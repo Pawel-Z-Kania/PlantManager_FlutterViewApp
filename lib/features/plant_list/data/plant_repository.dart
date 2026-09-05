@@ -13,7 +13,7 @@ class PlantRepository {
     final response = await _client
         .from('pots')
         .select(
-            'id, name, board_id, last_signal_time, dry_calibration_value, wet_calibration_value, pot_measurements(sensor_value)')
+            'id, name, board_id, last_signal_time, dry_calibration_value, wet_calibration_value, battery_mv, pot_measurements(sensor_value)')
         .order('measured_at', referencedTable: 'pot_measurements', ascending: false)
         .limit(1, referencedTable: 'pot_measurements');
 
@@ -45,6 +45,8 @@ class PlantRepository {
         ? DateTime.parse(row['last_signal_time']).toLocal()
         : DateTime.now();
 
+    final int? batteryMv = row['battery_mv'] != null ? (row['battery_mv'] as num).toInt() : null;
+
     return PlantPot(
       id: row['id'].toString(),
       boardId: row['board_id']?.toString() ?? '',
@@ -53,6 +55,7 @@ class PlantRepository {
       lastUpdate: updateTime,
       dryCalibration: row['dry_calibration_value'] ?? 700,
       wetCalibration: row['wet_calibration_value'] ?? 400,
+      batteryMv: batteryMv,
     );
   }
 }
