@@ -1,28 +1,27 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/config/env.dart';
 import '../domain/plant_pot.dart';
 
 class PlantRepository {
-  PlantRepository(this._client);
-
-  final SupabaseClient _client;
-
   Future<List<PlantPot>> fetchPlants() async {
-    final response = await _client
-        .from('pots')
-        .select(
-            'id, name, board_id, last_signal_time, dry_calibration_value, wet_calibration_value, battery_mv, pot_measurements(sensor_value)')
-        .order('measured_at', referencedTable: 'pot_measurements', ascending: false)
-        .limit(1, referencedTable: 'pot_measurements');
+    final uri = Uri.parse('${Env.vercelApiUrl}/api/pots');
+    final response = await http.get(uri).timeout(const Duration(seconds: 6));
 
-    return [for (final row in response) _mapRow(row)];
+    if (response.statusCode != 200) {
+      debugPrint('[PlantRepository] GET $uri -> ${response.statusCode}: ${response.body}');
+      throw Exception('Błąd serwera: ${response.statusCode}');
+    }
+
+    final List data = jsonDecode(response.body);
+    return [for (final row in data) _mapRow(Map<String, dynamic>.from(row))];
   }
 
   Future<void> updateSettings(String id, String name, int dry, int wet) async {
+    final uri = Uri.parse('${Env.vercelApiUrl}/api/update-pot');
     final response = await http.put(
-      Uri.parse('${Env.vercelApiUrl}/api/update-pot'),
+      uri,
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
         'id': id,
@@ -33,6 +32,7 @@ class PlantRepository {
     ).timeout(const Duration(seconds: 10));
 
     if (response.statusCode != 200) {
+      debugPrint('[PlantRepository] PUT $uri -> ${response.statusCode}: ${response.body}');
       throw Exception('Błąd serwera: ${response.statusCode}');
     }
   }
@@ -46,6 +46,14 @@ class PlantRepository {
         : DateTime.now();
 
     final int? batteryMv = row['battery_mv'] != null ? (row['battery_mv'] as num).toInt() : null;
+    final int? intervalMinutes =
+        row['interval_minutes'] != null ? (row['interval_minutes'] as num).toInt() : null;
+
+    final List rawAlerts = row['alerts'] as List? ?? [];
+    final List<PlantAlert> alerts = [
+      for (final a in rawAlerts)
+        if (a is Map) PlantAlert.fromJson(Map<String, dynamic>.from(a))
+    ];
 
     return PlantPot(
       id: row['id'].toString(),
@@ -56,6 +64,8 @@ class PlantRepository {
       dryCalibration: row['dry_calibration_value'] ?? 700,
       wetCalibration: row['wet_calibration_value'] ?? 400,
       batteryMv: batteryMv,
+      intervalMinutes: intervalMinutes,
+      alerts: alerts,
     );
   }
 }

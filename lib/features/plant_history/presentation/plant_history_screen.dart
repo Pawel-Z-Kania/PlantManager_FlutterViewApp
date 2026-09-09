@@ -12,9 +12,8 @@ class PlantHistoryScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final selectedPeriod = ref.watch(selectedPeriodProvider(plant.boardId));
-    final historyKey = (plant.boardId, selectedPeriod);
-    final historyAsync = ref.watch(historyProvider(historyKey));
+    final controller = ref.read(historyWindowProvider(plant.boardId).notifier);
+    final state = ref.watch(historyWindowProvider(plant.boardId));
 
     return Scaffold(
       appBar: AppBar(
@@ -24,36 +23,42 @@ class PlantHistoryScreen extends ConsumerWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: () => ref.invalidate(historyProvider(historyKey)),
+            onPressed: controller.refreshToNow,
           ),
         ],
       ),
       body: Column(
         children: [
           PeriodSelector(
-            selectedPeriod: selectedPeriod,
-            onSelected: (period) =>
-                ref.read(selectedPeriodProvider(plant.boardId).notifier).state = period,
+            windowHours: state.windowHours,
+            onSelected: controller.setWindowHours,
           ),
           Expanded(
-            child: historyAsync.when(
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (error, _) => _buildErrorState(ref, historyKey, error),
-              data: (data) => data.isEmpty
-                  ? const Center(child: Text('Brak danych dla wybranego okresu'))
-                  : HistoryChart(
-                      data: data,
-                      wetCalibration: plant.wetCalibration,
-                      dryCalibration: plant.dryCalibration,
-                    ),
-            ),
+            child: state.isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : state.error != null
+                    ? _buildErrorState(controller, state.error!)
+                    : state.measurements.isEmpty
+                        ? const Center(child: Text('Brak danych dla wybranego okresu'))
+                        : HistoryChart(
+                            data: state.measurements,
+                            wetCalibration: plant.wetCalibration,
+                            dryCalibration: plant.dryCalibration,
+                            windowHours: state.windowHours,
+                            fallbackExpectedInterval: plant.intervalMinutes != null
+                                ? Duration(minutes: plant.intervalMinutes!)
+                                : null,
+                            isLoadingOlder: state.isLoadingOlder,
+                            hasMoreOlderData: state.hasMoreOlderData,
+                            onNeedOlderData: controller.loadOlder,
+                          ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildErrorState(WidgetRef ref, (String, String) historyKey, Object error) {
+  Widget _buildErrorState(HistoryWindowController controller, Object error) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -63,7 +68,7 @@ class PlantHistoryScreen extends ConsumerWidget {
           Text('$error', style: const TextStyle(color: Colors.red)),
           const SizedBox(height: 12),
           ElevatedButton(
-            onPressed: () => ref.invalidate(historyProvider(historyKey)),
+            onPressed: controller.refreshToNow,
             child: const Text('Spróbuj ponownie'),
           ),
         ],

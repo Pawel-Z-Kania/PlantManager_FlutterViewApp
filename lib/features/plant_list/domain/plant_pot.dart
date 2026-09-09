@@ -4,38 +4,62 @@ import 'moisture_state.dart';
 enum AlertSeverity { error, warning }
 
 class PlantAlert {
+  final String code;
   final String label;
   final IconData icon;
   final Color color;
   final AlertSeverity severity;
 
   const PlantAlert({
+    required this.code,
     required this.label,
     required this.icon,
     required this.color,
     required this.severity,
   });
 
-  static PlantAlert disconnection() => const PlantAlert(
-        label: 'Brak połączenia',
-        icon: Icons.wifi_off_rounded,
-        color: Colors.red,
-        severity: AlertSeverity.error,
-      );
+  factory PlantAlert.fromJson(Map<String, dynamic> json) {
+    final String severityStr = json['severity']?.toString() ?? 'warning';
+    final AlertSeverity severity = severityStr.toLowerCase() == 'error'
+        ? AlertSeverity.error
+        : AlertSeverity.warning;
 
-  static PlantAlert criticalBattery(int mv) => PlantAlert(
-        label: 'Bateria ${mv}mV',
-        icon: Icons.battery_0_bar_rounded,
-        color: Colors.red,
-        severity: AlertSeverity.error,
-      );
+    final String iconName = json['icon']?.toString() ?? json['code']?.toString() ?? '';
+    final IconData icon = _mapIconName(iconName, severity);
 
-  static PlantAlert lowBattery(int mv) => PlantAlert(
-        label: 'Bateria ${mv}mV',
-        icon: Icons.battery_3_bar_rounded,
-        color: Colors.amber,
-        severity: AlertSeverity.warning,
-      );
+    final Color color = severity == AlertSeverity.error ? Colors.red : Colors.amber;
+
+    return PlantAlert(
+      code: json['code']?.toString() ?? 'ALERT',
+      label: json['label']?.toString() ?? 'Alert',
+      icon: icon,
+      color: color,
+      severity: severity,
+    );
+  }
+
+  static IconData _mapIconName(String iconName, AlertSeverity severity) {
+    final lower = iconName.toLowerCase();
+    if (lower.contains('wifi') || lower.contains('disconnect')) {
+      return Icons.wifi_off_rounded;
+    }
+    if (lower.contains('battery') && (lower.contains('0') || lower.contains('critical'))) {
+      return Icons.battery_0_bar_rounded;
+    }
+    if (lower.contains('battery')) {
+      return Icons.battery_3_bar_rounded;
+    }
+    return severity == AlertSeverity.error
+        ? Icons.error_outline_rounded
+        : Icons.warning_amber_rounded;
+  }
+
+  Map<String, dynamic> toJson() => {
+        'code': code,
+        'label': label,
+        'icon': code.toLowerCase(),
+        'severity': severity == AlertSeverity.error ? 'error' : 'warning',
+      };
 }
 
 class PlantPot {
@@ -48,6 +72,8 @@ class PlantPot {
   final int dryCalibration;
   final int wetCalibration;
   final int? batteryMv;
+  final int? intervalMinutes;
+  final List<PlantAlert> alerts;
 
   PlantPot({
     required this.id,
@@ -58,13 +84,13 @@ class PlantPot {
     required this.dryCalibration,
     required this.wetCalibration,
     this.batteryMv,
+    this.intervalMinutes,
+    this.alerts = const [],
   });
 
   MoistureState get moistureState {
     if (dryCalibration == wetCalibration) return MoistureState.humid;
 
-    // Obliczamy udział w zakresie, od 0 (Mokro) do 1 (Sucho)
-    // Zakładamy, że sucho to odczyt wyższy (>700), mokro to niższy (<400)
     double pct = (moistureValue - wetCalibration) / (dryCalibration - wetCalibration);
 
     if (pct >= 0.75) return MoistureState.dry;
@@ -72,29 +98,11 @@ class PlantPot {
     return MoistureState.humid;
   }
 
-  List<PlantAlert> get activeAlerts {
-    final alerts = <PlantAlert>[];
-
-    // Sprawdzenie rozłączenia (> 2 godziny)
-    if (DateTime.now().difference(lastUpdate).inHours >= 2) {
-      alerts.add(PlantAlert.disconnection());
-    }
-
-    // Sprawdzenie baterii
-    if (batteryMv != null) {
-      if (batteryMv! < 2700) {
-        alerts.add(PlantAlert.criticalBattery(batteryMv!));
-      } else if (batteryMv! <= 2800) {
-        alerts.add(PlantAlert.lowBattery(batteryMv!));
-      }
-    }
-
-    return alerts;
-  }
+  List<PlantAlert> get activeAlerts => alerts;
 
   bool get hasError =>
-      activeAlerts.any((a) => a.severity == AlertSeverity.error);
+      alerts.any((a) => a.severity == AlertSeverity.error);
 
   bool get hasWarning =>
-      activeAlerts.any((a) => a.severity == AlertSeverity.warning);
+      alerts.any((a) => a.severity == AlertSeverity.warning);
 }

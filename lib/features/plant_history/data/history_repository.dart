@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../../../core/config/env.dart';
 import '../domain/history_measurement.dart';
@@ -20,6 +21,7 @@ class HistoryRepository {
     final uri = Uri.parse('${Env.vercelApiUrl}/api/history').replace(queryParameters: params);
     final response = await http.get(uri).timeout(const Duration(seconds: 15));
     if (response.statusCode != 200) {
+      debugPrint('[HistoryRepository] GET $uri -> ${response.statusCode}: ${response.body}');
       throw Exception('Błąd serwera: ${response.statusCode}');
     }
     final body = jsonDecode(response.body) as Map<String, dynamic>;

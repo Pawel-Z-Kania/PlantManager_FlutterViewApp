@@ -1,13 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../data/plant_repository.dart';
 import '../domain/plant_pot.dart';
 
-final supabaseClientProvider = Provider<SupabaseClient>((ref) => Supabase.instance.client);
-
-final plantRepositoryProvider = Provider<PlantRepository>(
-  (ref) => PlantRepository(ref.watch(supabaseClientProvider)),
-);
+final plantRepositoryProvider = Provider<PlantRepository>((ref) => PlantRepository());
 
 final plantsProvider = AsyncNotifierProvider<PlantsNotifier, List<PlantPot>>(PlantsNotifier.new);
 

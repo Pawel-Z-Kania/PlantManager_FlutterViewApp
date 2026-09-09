@@ -1,17 +1,17 @@
 import 'package:flutter/material.dart';
+import '../../providers/history_providers.dart';
 
+/// Wybór szerokości "okna" wykresu; starsze dane wczytuje się przewijając wykres wstecz,
+/// więc nie ma tu już opcji "Wszystko".
 class PeriodSelector extends StatelessWidget {
   const PeriodSelector({
     super.key,
-    required this.selectedPeriod,
+    required this.windowHours,
     required this.onSelected,
   });
 
-  final String selectedPeriod;
-  final ValueChanged<String> onSelected;
-
-  static const _periods = ['12h', '24h', '3d', '7d', 'all'];
-  static const _labels = {'12h': '12h', '24h': '24h', '3d': '3 dni', '7d': 'Tydzień', 'all': 'Wszystko'};
+  final int windowHours;
+  final ValueChanged<int> onSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -19,14 +19,14 @@ class PeriodSelector extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
-        children: _periods.map((p) => Padding(
+        children: historyWindowHoursOptions.map((hours) => Padding(
           padding: const EdgeInsets.symmetric(horizontal: 3),
           child: ChoiceChip(
-            label: Text(_labels[p]!),
-            selected: selectedPeriod == p,
+            label: Text(historyWindowLabels[hours]!),
+            selected: windowHours == hours,
             selectedColor: Colors.green.shade600,
-            labelStyle: TextStyle(color: selectedPeriod == p ? Colors.white : null),
-            onSelected: (_) => onSelected(p),
+            labelStyle: TextStyle(color: windowHours == hours ? Colors.white : null),
+            onSelected: (_) => onSelected(hours),
           ),
         )).toList(),
       ),
