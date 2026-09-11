@@ -14,6 +14,8 @@ class HistoryChart extends StatefulWidget {
     required this.wetCalibration,
     required this.dryCalibration,
     required this.windowHours,
+    required this.axisStart,
+    required this.axisEnd,
     this.fallbackExpectedInterval,
     this.isLoadingOlder = false,
     this.hasMoreOlderData = true,
@@ -24,6 +26,8 @@ class HistoryChart extends StatefulWidget {
   final int wetCalibration;
   final int dryCalibration;
   final int windowHours;
+  final DateTime axisStart;
+  final DateTime axisEnd;
   final Duration? fallbackExpectedInterval;
   final bool isLoadingOlder;
   final bool hasMoreOlderData;
@@ -35,26 +39,14 @@ class HistoryChart extends StatefulWidget {
 
 class _HistoryChartState extends State<HistoryChart> {
   final TransformationController _transformationController = TransformationController();
-  DateTime? _oldestLoadedTimestamp;
-  bool _olderRequestPending = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _oldestLoadedTimestamp = widget.data.isNotEmpty ? widget.data.first.measuredAt : null;
-  }
 
   @override
   void didUpdateWidget(covariant HistoryChart oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.data.isEmpty) return;
-
-    final newOldest = widget.data.first.measuredAt;
-    final previousOldest = _oldestLoadedTimestamp;
-    if (previousOldest != null && newOldest.isBefore(previousOldest)) {
-      // Doszły starsze dane z przodu listy — przesuwamy transformację o dodaną szerokość,
+    if (widget.axisStart.isBefore(oldWidget.axisStart)) {
+      // Doszło starsze okno po lewej — przesuwamy transformację o dodaną szerokość,
       // żeby użytkownik nie zobaczył "skoku" widoku po doładowaniu.
-      final addedSeconds = previousOldest.difference(newOldest).inSeconds.toDouble();
+      final addedSeconds = oldWidget.axisStart.difference(widget.axisStart).inSeconds.toDouble();
       final addedWidth = addedSeconds * _pxPerSecondFor(widget.windowHours);
       final matrix = _transformationController.value.clone()..translateByDouble(-addedWidth, 0, 0, 1);
       _transformationController.value = matrix;
@@ -62,8 +54,6 @@ class _HistoryChartState extends State<HistoryChart> {
     if (widget.windowHours != oldWidget.windowHours) {
       _transformationController.value = Matrix4.identity();
     }
-    _olderRequestPending = false;
-    _oldestLoadedTimestamp = newOldest;
   }
 
   @override
@@ -78,21 +68,6 @@ class _HistoryChartState extends State<HistoryChart> {
     return 100.0 / 86400.0; // 100px na dzień
   }
 
-  void _maybeRequestOlderData() {
-    if (widget.onNeedOlderData == null || _olderRequestPending) return;
-    if (widget.isLoadingOlder || !widget.hasMoreOlderData) return;
-
-    // screenX = scale*childX + translationX -> lewa krawędź viewportu w przestrzeni
-    // dziecka to -translationX/scale; blisko 0 oznacza dotarcie do początku wczytanej historii.
-    final matrix = _transformationController.value;
-    final scale = matrix.getMaxScaleOnAxis();
-    final viewportLeftInChildSpace = -matrix.getTranslation().x / scale;
-    if (viewportLeftInChildSpace < 80) {
-      _olderRequestPending = true;
-      widget.onNeedOlderData!.call();
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     if (widget.data.isEmpty) return const SizedBox.shrink();
@@ -100,9 +75,7 @@ class _HistoryChartState extends State<HistoryChart> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final pxPerSecond = _pxPerSecondFor(widget.windowHours);
-        final minTs = widget.data.first.measuredAt.millisecondsSinceEpoch / 1000.0;
-        final maxTs = widget.data.last.measuredAt.millisecondsSinceEpoch / 1000.0;
-        final rangeSeconds = max(maxTs - minTs, 3600.0);
+        final rangeSeconds = max(widget.axisEnd.difference(widget.axisStart).inSeconds.toDouble(), 3600.0);
         final estimatedWidth = rangeSeconds * pxPerSecond;
         final chartWidth = max(constraints.maxWidth, estimatedWidth);
 
@@ -115,8 +88,6 @@ class _HistoryChartState extends State<HistoryChart> {
                 boundaryMargin: const EdgeInsets.symmetric(horizontal: 16),
                 minScale: 0.5,
                 maxScale: 5.0,
-                onInteractionUpdate: (_) => _maybeRequestOlderData(),
-                onInteractionEnd: (_) => _maybeRequestOlderData(),
                 child: SizedBox(
                   width: chartWidth,
                   height: constraints.maxHeight,
@@ -130,7 +101,7 @@ class _HistoryChartState extends State<HistoryChart> {
             if (widget.isLoadingOlder)
               const Positioned(
                 left: 4,
-                top: 4,
+                top: 8,
                 child: SizedBox(
                   width: 16,
                   height: 16,
@@ -140,10 +111,20 @@ class _HistoryChartState extends State<HistoryChart> {
             else if (!widget.hasMoreOlderData)
               const Positioned(
                 left: 4,
-                top: 4,
+                top: 8,
                 child: Text(
                   'Brak starszych danych',
                   style: TextStyle(fontSize: 10, color: Colors.black45),
+                ),
+              )
+            else if (widget.onNeedOlderData != null)
+              Positioned(
+                left: 0,
+                top: 0,
+                child: IconButton(
+                  tooltip: 'Wczytaj starsze dane',
+                  icon: const Icon(Icons.chevron_left),
+                  onPressed: widget.onNeedOlderData,
                 ),
               ),
           ],
@@ -169,10 +150,8 @@ class _HistoryChartState extends State<HistoryChart> {
       if (gapStarts.contains(m.measuredAt)) spots.add(FlSpot.nullSpot);
     }
 
-    final minX = data.first.measuredAt.millisecondsSinceEpoch / 1000.0;
-    final maxX = data.length > 1
-        ? data.last.measuredAt.millisecondsSinceEpoch / 1000.0
-        : minX + 3600;
+    final minX = widget.axisStart.millisecondsSinceEpoch / 1000.0;
+    final maxX = widget.axisEnd.millisecondsSinceEpoch / 1000.0;
 
     final double intervalX;
     final bool showDate;

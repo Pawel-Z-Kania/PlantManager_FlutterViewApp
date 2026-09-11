@@ -26,8 +26,31 @@ class HistoryRepository {
     }
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     final list = body['data'] as List<dynamic>;
-    return list
+    final measurements = list
         .map((e) => HistoryMeasurement.fromJson(e as Map<String, dynamic>))
+        .where((measurement) {
+          final isInRequestedRange =
+              !measurement.measuredAt.isBefore(from) && !measurement.measuredAt.isAfter(to);
+          if (!isInRequestedRange) {
+            debugPrint(
+              '[HistoryRepository] Ignoring measurement outside requested range: '
+              '${measurement.measuredAt.toIso8601String()} not in '
+              '${from.toIso8601String()} - ${to.toIso8601String()}',
+            );
+          }
+          return isInRequestedRange;
+        })
         .toList();
+
+    final byTimestamp = <int, HistoryMeasurement>{
+      for (final measurement in measurements)
+        measurement.measuredAt.millisecondsSinceEpoch: measurement,
+    };
+    final normalized = byTimestamp.values.toList()
+      ..sort((first, second) => first.measuredAt.compareTo(second.measuredAt));
+    if (normalized.length != measurements.length) {
+      debugPrint('[HistoryRepository] Removed duplicate measurement timestamps from API response');
+    }
+    return normalized;
   }
 }

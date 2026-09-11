@@ -16,6 +16,7 @@ class HistoryWindowState {
   final int windowHours;
   final List<HistoryMeasurement> measurements;
   final DateTime? loadedFrom;
+  final DateTime? loadedTo;
   final bool isLoading;
   final bool isLoadingOlder;
   final bool hasMoreOlderData;
@@ -25,6 +26,7 @@ class HistoryWindowState {
     required this.windowHours,
     this.measurements = const [],
     this.loadedFrom,
+    this.loadedTo,
     this.isLoading = false,
     this.isLoadingOlder = false,
     this.hasMoreOlderData = true,
@@ -34,6 +36,7 @@ class HistoryWindowState {
   HistoryWindowState copyWith({
     List<HistoryMeasurement>? measurements,
     DateTime? loadedFrom,
+    DateTime? loadedTo,
     bool? isLoading,
     bool? isLoadingOlder,
     bool? hasMoreOlderData,
@@ -44,6 +47,7 @@ class HistoryWindowState {
       windowHours: windowHours,
       measurements: measurements ?? this.measurements,
       loadedFrom: loadedFrom ?? this.loadedFrom,
+      loadedTo: loadedTo ?? this.loadedTo,
       isLoading: isLoading ?? this.isLoading,
       isLoadingOlder: isLoadingOlder ?? this.isLoadingOlder,
       hasMoreOlderData: hasMoreOlderData ?? this.hasMoreOlderData,
@@ -61,28 +65,34 @@ class HistoryWindowController extends StateNotifier<HistoryWindowState> {
   final HistoryRepository _repository;
   final String _boardId;
   int _loadedChunks = 0;
+  int _requestVersion = 0;
 
   int get _bucketMinutes => historyWindowBucketMinutes[state.windowHours] ?? 0;
 
   Future<void> _loadInitial() async {
+    final requestVersion = ++_requestVersion;
+    final windowHours = state.windowHours;
     state = state.copyWith(isLoading: true, clearError: true);
     final to = DateTime.now();
-    final from = to.subtract(Duration(hours: state.windowHours));
+    final from = to.subtract(Duration(hours: windowHours));
     try {
       final data = await _repository.fetchHistory(
         _boardId,
         from: from,
         to: to,
-        bucketMinutes: _bucketMinutes,
+        bucketMinutes: historyWindowBucketMinutes[windowHours] ?? 0,
       );
+      if (requestVersion != _requestVersion) return;
       _loadedChunks = 1;
       state = state.copyWith(
         measurements: data,
         loadedFrom: from,
+        loadedTo: to,
         isLoading: false,
         hasMoreOlderData: true,
       );
     } catch (e) {
+      if (requestVersion != _requestVersion) return;
       state = state.copyWith(isLoading: false, error: e);
     }
   }
@@ -105,6 +115,7 @@ class HistoryWindowController extends StateNotifier<HistoryWindowState> {
   Future<void> loadOlder() async {
     if (state.isLoadingOlder || !state.hasMoreOlderData || state.loadedFrom == null) return;
 
+    final requestVersion = _requestVersion;
     state = state.copyWith(isLoadingOlder: true, clearError: true);
     final to = state.loadedFrom!;
     final from = to.subtract(Duration(hours: state.windowHours));
@@ -115,12 +126,13 @@ class HistoryWindowController extends StateNotifier<HistoryWindowState> {
         to: to,
         bucketMinutes: _bucketMinutes,
       );
+      if (requestVersion != _requestVersion) return;
       if (older.isEmpty) {
         state = state.copyWith(isLoadingOlder: false, hasMoreOlderData: false);
         return;
       }
       _loadedChunks++;
-      var merged = [...older, ...state.measurements];
+      var merged = _mergeMeasurements(older, state.measurements);
       if (_loadedChunks > _maxLoadedWindows) {
         // Obcinamy najnowszy (dalszy od aktualnie oglądanej, wcześniejszej krawędzi) koniec,
         // żeby nie trzymać w pamięci więcej niż _maxLoadedWindows okien naraz.
@@ -135,9 +147,23 @@ class HistoryWindowController extends StateNotifier<HistoryWindowState> {
         hasMoreOlderData: true,
       );
     } catch (e) {
+      if (requestVersion != _requestVersion) return;
       state = state.copyWith(isLoadingOlder: false, error: e);
     }
   }
+}
+
+List<HistoryMeasurement> _mergeMeasurements(
+  List<HistoryMeasurement> older,
+  List<HistoryMeasurement> newer,
+) {
+  final measurementsByTimestamp = <int, HistoryMeasurement>{
+    for (final measurement in older) measurement.measuredAt.millisecondsSinceEpoch: measurement,
+    for (final measurement in newer) measurement.measuredAt.millisecondsSinceEpoch: measurement,
+  };
+  final merged = measurementsByTimestamp.values.toList()
+    ..sort((first, second) => first.measuredAt.compareTo(second.measuredAt));
+  return merged;
 }
 
 final historyRepositoryProvider = Provider<HistoryRepository>((ref) => HistoryRepository());
