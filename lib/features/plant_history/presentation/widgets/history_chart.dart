@@ -3,6 +3,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import '../../domain/history_gap_detector.dart';
 import '../../domain/history_measurement.dart';
+import 'frozen_y_axis.dart';
 
 /// Próg luki = mediana odstępów (lub fallback) pomnożona przez ten współczynnik.
 const _gapFactor = 3.5;
@@ -38,27 +39,46 @@ class HistoryChart extends StatefulWidget {
 }
 
 class _HistoryChartState extends State<HistoryChart> {
-  final TransformationController _transformationController = TransformationController();
+  static const _screenHorizontalPadding = 16.0;
+  static const _frozenAxisWidth = 48.0;
+  static const _chartTopPadding = 24.0;
+  static const _chartBottomPadding = 16.0;
+  static const _yAxisInterval = 256.0;
+  static const _initialHiddenFraction = 0.1;
+  static const _olderDataTriggerOffset = 8.0;
+
+  final ScrollController _scrollController = ScrollController();
+  bool _needsInitialOffset = true;
+  bool _olderDataRequested = false;
 
   @override
   void didUpdateWidget(covariant HistoryChart oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.axisStart.isBefore(oldWidget.axisStart)) {
-      // Doszło starsze okno po lewej — przesuwamy transformację o dodaną szerokość,
-      // żeby użytkownik nie zobaczył "skoku" widoku po doładowaniu.
+      // Doszło starsze okno po lewej — zachowujemy aktualnie oglądany fragment.
       final addedSeconds = oldWidget.axisStart.difference(widget.axisStart).inSeconds.toDouble();
       final addedWidth = addedSeconds * _pxPerSecondFor(widget.windowHours);
-      final matrix = _transformationController.value.clone()..translateByDouble(-addedWidth, 0, 0, 1);
-      _transformationController.value = matrix;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollController.hasClients) return;
+        final position = _scrollController.position;
+        final targetOffset = (position.pixels + addedWidth).clamp(0.0, position.maxScrollExtent);
+        _scrollController.jumpTo(targetOffset);
+      });
     }
     if (widget.windowHours != oldWidget.windowHours) {
-      _transformationController.value = Matrix4.identity();
+      _needsInitialOffset = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) _scrollController.jumpTo(0);
+      });
+    }
+    if (!widget.isLoadingOlder && oldWidget.isLoadingOlder) {
+      _olderDataRequested = false;
     }
   }
 
   @override
   void dispose() {
-    _transformationController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -74,63 +94,116 @@ class _HistoryChartState extends State<HistoryChart> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final pxPerSecond = _pxPerSecondFor(widget.windowHours);
-        final rangeSeconds = max(widget.axisEnd.difference(widget.axisStart).inSeconds.toDouble(), 3600.0);
-        final estimatedWidth = rangeSeconds * pxPerSecond;
-        final chartWidth = max(constraints.maxWidth, estimatedWidth);
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(
+            _screenHorizontalPadding,
+            0,
+            _screenHorizontalPadding,
+            _screenHorizontalPadding,
+          ),
+          child: LayoutBuilder(
+            builder: (context, viewportConstraints) {
+              final pxPerSecond = _pxPerSecondFor(widget.windowHours);
+              final rangeSeconds = max(widget.axisEnd.difference(widget.axisStart).inSeconds.toDouble(), 3600.0);
+              final estimatedWidth = rangeSeconds * pxPerSecond;
+              final plotWidth = viewportConstraints.maxWidth - _frozenAxisWidth;
+              final initialOffset = plotWidth * _initialHiddenFraction;
+              final chartWidth = max(estimatedWidth, plotWidth + initialOffset);
+              final bottomTitleSize = widget.windowHours <= 24 ? 32.0 : 40.0;
 
-        return Stack(
-          children: [
-            ClipRect(
-              child: InteractiveViewer(
-                transformationController: _transformationController,
-                constrained: false,
-                boundaryMargin: const EdgeInsets.symmetric(horizontal: 16),
-                minScale: 0.5,
-                maxScale: 5.0,
-                child: SizedBox(
-                  width: chartWidth,
-                  height: constraints.maxHeight,
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 24, 24, 16),
-                    child: LineChart(_buildChartData()),
+              if (_needsInitialOffset) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!_needsInitialOffset || !_scrollController.hasClients) return;
+                  final position = _scrollController.position;
+                  _scrollController.jumpTo(min(initialOffset, position.maxScrollExtent));
+                  _needsInitialOffset = false;
+                });
+              }
+
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SizedBox(
+                    width: _frozenAxisWidth,
+                    child: FrozenYAxis(
+                      topPadding: _chartTopPadding,
+                      bottomPadding: _chartBottomPadding + bottomTitleSize,
+                      wetCalibration: widget.wetCalibration,
+                      dryCalibration: widget.dryCalibration,
+                    ),
                   ),
-                ),
-              ),
-            ),
-            if (widget.isLoadingOlder)
-              const Positioned(
-                left: 4,
-                top: 8,
-                child: SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              )
-            else if (!widget.hasMoreOlderData)
-              const Positioned(
-                left: 4,
-                top: 8,
-                child: Text(
-                  'Brak starszych danych',
-                  style: TextStyle(fontSize: 10, color: Colors.black45),
-                ),
-              )
-            else if (widget.onNeedOlderData != null)
-              Positioned(
-                left: 0,
-                top: 0,
-                child: IconButton(
-                  tooltip: 'Wczytaj starsze dane',
-                  icon: const Icon(Icons.chevron_left),
-                  onPressed: widget.onNeedOlderData,
-                ),
-              ),
-          ],
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        ClipRect(
+                          child: NotificationListener<ScrollNotification>(
+                            onNotification: _handleScrollNotification,
+                            child: SingleChildScrollView(
+                              controller: _scrollController,
+                              scrollDirection: Axis.horizontal,
+                              clipBehavior: Clip.hardEdge,
+                              child: SizedBox(
+                                width: chartWidth,
+                                height: viewportConstraints.maxHeight,
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    0,
+                                    _chartTopPadding,
+                                    24,
+                                    _chartBottomPadding,
+                                  ),
+                                  child: LineChart(_buildChartData()),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (widget.isLoadingOlder)
+                          const Positioned(
+                            left: 4,
+                            top: 8,
+                            child: SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        if (!widget.isLoadingOlder && !widget.hasMoreOlderData)
+                          const Positioned(
+                            left: 4,
+                            top: 8,
+                            child: Text(
+                              'Brak starszych danych',
+                              style: TextStyle(fontSize: 10, color: Colors.black45),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
         );
       },
     );
+  }
+
+  bool _handleScrollNotification(ScrollNotification notification) {
+    if (notification.metrics.axis != Axis.horizontal || notification is! ScrollUpdateNotification) {
+      return false;
+    }
+    if (notification.metrics.pixels > _olderDataTriggerOffset ||
+        _olderDataRequested ||
+        widget.isLoadingOlder ||
+        !widget.hasMoreOlderData ||
+        widget.onNeedOlderData == null) {
+      return false;
+    }
+
+    _olderDataRequested = true;
+    widget.onNeedOlderData!();
+    return false;
   }
 
   LineChartData _buildChartData() {
@@ -209,20 +282,9 @@ class _HistoryChartState extends State<HistoryChart> {
     return LineChartData(
       minX: minX,
       maxX: maxX,
-      gridData: const FlGridData(show: true),
+      gridData: const FlGridData(show: true, horizontalInterval: _yAxisInterval),
       titlesData: FlTitlesData(
-        leftTitles: AxisTitles(
-          axisNameWidget: const Text('Wartość ADC', style: TextStyle(fontSize: 10)),
-          axisNameSize: 16,
-          sideTitles: SideTitles(
-            showTitles: true,
-            reservedSize: 40,
-            getTitlesWidget: (value, meta) => Text(
-              value.toInt().toString(),
-              style: const TextStyle(fontSize: 10),
-            ),
-          ),
-        ),
+        leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
         bottomTitles: AxisTitles(
           sideTitles: SideTitles(
             showTitles: true,
