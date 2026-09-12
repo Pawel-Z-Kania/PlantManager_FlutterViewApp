@@ -8,6 +8,9 @@ import 'frozen_y_axis.dart';
 /// Próg luki = mediana odstępów (lub fallback) pomnożona przez ten współczynnik.
 const _gapFactor = 3.5;
 
+/// Odstęp linii siatki pionowej — 12h w sekundach, licząc od epoki, więc zawsze wypada o 00:00/12:00 czasu lokalnego.
+const _verticalGridIntervalSeconds = 12 * 3600.0;
+
 class HistoryChart extends StatefulWidget {
   const HistoryChart({
     super.key,
@@ -311,7 +314,21 @@ class _HistoryChartState extends State<HistoryChart> {
     return LineChartData(
       minX: minX,
       maxX: maxX,
-      gridData: const FlGridData(show: true, horizontalInterval: _yAxisInterval),
+      gridData: FlGridData(
+        show: true,
+        horizontalInterval: _yAxisInterval,
+        verticalInterval: _verticalGridIntervalSeconds,
+        getDrawingHorizontalLine: (value) => FlLine(
+          color: Colors.blueGrey.withValues(alpha: 0.15),
+          strokeWidth: 0.4,
+          dashArray: const [8, 4],
+        ),
+        getDrawingVerticalLine: (value) => FlLine(
+          color: Colors.blueGrey.withValues(alpha: 0.15),
+          strokeWidth: 0.4,
+          dashArray: const [8, 4],
+        ),
+      ),
       titlesData: FlTitlesData(
         leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
         bottomTitles: AxisTitles(
@@ -367,7 +384,7 @@ class _HistoryChartState extends State<HistoryChart> {
             strokeWidth: 2,
             dashArray: [5, 5],
             label: HorizontalLineLabel(
-              show: true,
+              show: false,
               alignment: Alignment.topRight,
               padding: const EdgeInsets.only(right: 5, bottom: 5),
               style: const TextStyle(color: Colors.blue, fontSize: 10),
@@ -380,7 +397,7 @@ class _HistoryChartState extends State<HistoryChart> {
             strokeWidth: 2,
             dashArray: [5, 5],
             label: HorizontalLineLabel(
-              show: true,
+              show: false,
               alignment: Alignment.bottomRight,
               padding: const EdgeInsets.only(right: 5, top: 5),
               style: const TextStyle(color: Colors.orange, fontSize: 10),
