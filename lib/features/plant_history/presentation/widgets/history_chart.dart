@@ -45,6 +45,7 @@ class _HistoryChartState extends State<HistoryChart> {
   static const _chartBottomPadding = 16.0;
   static const _yAxisInterval = 256.0;
   static const _initialHiddenFraction = 0.1;
+  static const _rightNowBufferFraction = 0.15;
   static const _olderDataTriggerOffset = 8.0;
 
   final ScrollController _scrollController = ScrollController();
@@ -108,7 +109,12 @@ class _HistoryChartState extends State<HistoryChart> {
               final estimatedWidth = rangeSeconds * pxPerSecond;
               final plotWidth = viewportConstraints.maxWidth - _frozenAxisWidth;
               final initialOffset = plotWidth * _initialHiddenFraction;
-              final chartWidth = max(estimatedWidth, plotWidth + initialOffset);
+              final rightNowBufferWidth = plotWidth * _rightNowBufferFraction;
+              final rightNowBufferSeconds = rightNowBufferWidth / pxPerSecond;
+              final chartWidth = max(
+                estimatedWidth + rightNowBufferWidth,
+                plotWidth + initialOffset,
+              );
               final bottomTitleSize = widget.windowHours <= 24 ? 32.0 : 40.0;
 
               if (_needsInitialOffset) {
@@ -152,7 +158,7 @@ class _HistoryChartState extends State<HistoryChart> {
                                     24,
                                     _chartBottomPadding,
                                   ),
-                                  child: LineChart(_buildChartData()),
+                                  child: LineChart(_buildChartData(rightNowBufferSeconds)),
                                 ),
                               ),
                             ),
@@ -206,7 +212,7 @@ class _HistoryChartState extends State<HistoryChart> {
     return false;
   }
 
-  LineChartData _buildChartData() {
+  LineChartData _buildChartData(double rightNowBufferSeconds) {
     final data = widget.data;
     final gaps = detectGaps(
       data,
@@ -224,7 +230,8 @@ class _HistoryChartState extends State<HistoryChart> {
     }
 
     final minX = widget.axisStart.millisecondsSinceEpoch / 1000.0;
-    final maxX = widget.axisEnd.millisecondsSinceEpoch / 1000.0;
+    final nowX = widget.axisEnd.millisecondsSinceEpoch / 1000.0;
+    final maxX = nowX + rightNowBufferSeconds;
 
     final double intervalX;
     final bool showDate;
@@ -324,6 +331,13 @@ class _HistoryChartState extends State<HistoryChart> {
       minY: 0,
       maxY: 1024,
       extraLinesData: ExtraLinesData(
+        verticalLines: [
+          VerticalLine(
+            x: nowX,
+            color: Colors.green.shade800.withValues(alpha: 0.8),
+            strokeWidth: 2,
+          ),
+        ],
         horizontalLines: [
           HorizontalLine(
             y: widget.wetCalibration.toDouble(),
