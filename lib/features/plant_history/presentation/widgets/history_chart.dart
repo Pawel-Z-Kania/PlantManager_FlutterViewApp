@@ -164,6 +164,28 @@ class _HistoryChartState extends State<HistoryChart> {
                             ),
                           ),
                         ),
+                        Positioned(
+                          top: 0,
+                          right: 0,
+                          bottom: 0,
+                          width: _frozenAxisWidth,
+                          child: IgnorePointer(
+                            child: Container(
+                              color: Theme.of(context).scaffoldBackgroundColor,
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          top: _chartTopPadding,
+                          right: _frozenAxisWidth,
+                          bottom: _chartBottomPadding + bottomTitleSize,
+                          child: IgnorePointer(
+                            child: Container(
+                              width: 1,
+                              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5),
+                            ),
+                          ),
+                        ),
                         if (widget.isLoadingOlder)
                           const Positioned(
                             left: 4,
