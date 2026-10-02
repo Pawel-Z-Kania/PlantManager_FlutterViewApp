@@ -17,7 +17,6 @@ class HistoryChart extends StatefulWidget {
     required this.data,
     required this.wetCalibration,
     required this.dryCalibration,
-    required this.windowHours,
     required this.axisStart,
     required this.axisEnd,
     this.fallbackExpectedInterval,
@@ -29,7 +28,6 @@ class HistoryChart extends StatefulWidget {
   final List<HistoryMeasurement> data;
   final int wetCalibration;
   final int dryCalibration;
-  final int windowHours;
   final DateTime axisStart;
   final DateTime axisEnd;
   final Duration? fallbackExpectedInterval;
@@ -47,32 +45,53 @@ class _HistoryChartState extends State<HistoryChart> {
   static const _chartTopPadding = 24.0;
   static const _chartBottomPadding = 16.0;
   static const _yAxisInterval = 256.0;
-  static const _initialHiddenFraction = 0.1;
+  static const _initialScale = 2.0;
+  static const _maximumScale = 8.0;
   static const _rightNowBufferFraction = 0.15;
   static const _olderDataTriggerOffset = 8.0;
 
-  final ScrollController _scrollController = ScrollController();
-  bool _needsInitialOffset = true;
+  final TransformationController _transformationController =
+      TransformationController();
+  bool _needsInitialViewport = true;
   bool _olderDataRequested = false;
+  bool _ignoringTransformationChange = false;
+  double _viewportWidth = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _transformationController.addListener(_handleTransformationChange);
+  }
 
   @override
   void didUpdateWidget(covariant HistoryChart oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.axisStart.isBefore(oldWidget.axisStart)) {
-      // Doszło starsze okno po lewej — zachowujemy aktualnie oglądany fragment.
-      final addedSeconds = oldWidget.axisStart.difference(widget.axisStart).inSeconds.toDouble();
-      final addedWidth = addedSeconds * _pxPerSecondFor(widget.windowHours);
+      final addedSeconds = oldWidget.axisStart
+          .difference(widget.axisStart)
+          .inSeconds
+          .toDouble();
+      final oldRangeSeconds = _axisRangeSeconds(
+        oldWidget.axisStart,
+        oldWidget.axisEnd,
+      );
+      final newRangeSeconds = _axisRangeSeconds(
+        widget.axisStart,
+        widget.axisEnd,
+      );
+      final scale = _transformationController.value.getMaxScaleOnAxis();
+      final oldTranslationX = _transformationController.value
+          .getTranslation()
+          .x;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!_scrollController.hasClients) return;
-        final position = _scrollController.position;
-        final targetOffset = (position.pixels + addedWidth).clamp(0.0, position.maxScrollExtent);
-        _scrollController.jumpTo(targetOffset);
-      });
-    }
-    if (widget.windowHours != oldWidget.windowHours) {
-      _needsInitialOffset = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) _scrollController.jumpTo(0);
+        if (!mounted || _viewportWidth == 0) return;
+        final oldVisibleFraction = (-oldTranslationX / (scale * _viewportWidth))
+            .clamp(0.0, 1.0);
+        final newVisibleFraction =
+            ((addedSeconds + oldVisibleFraction * oldRangeSeconds) /
+                    newRangeSeconds)
+                .clamp(0.0, 1.0);
+        _setTransformation(scale, -newVisibleFraction * scale * _viewportWidth);
       });
     }
     if (!widget.isLoadingOlder && oldWidget.isLoadingOlder) {
@@ -82,14 +101,61 @@ class _HistoryChartState extends State<HistoryChart> {
 
   @override
   void dispose() {
-    _scrollController.dispose();
+    _transformationController
+      ..removeListener(_handleTransformationChange)
+      ..dispose();
     super.dispose();
   }
 
-  static double _pxPerSecondFor(int windowHours) {
-    if (windowHours <= 24) return 60.0 / 3600.0; // 60px na godzinę
-    if (windowHours <= 72) return 80.0 / 14400.0; // 80px na 4 godziny
-    return 100.0 / 86400.0; // 100px na dzień
+  double _axisRangeSeconds(DateTime start, DateTime end) {
+    final rangeSeconds = max(
+      end.difference(start).inSeconds.toDouble(),
+      3600.0,
+    );
+    return rangeSeconds * (1 + _rightNowBufferFraction);
+  }
+
+  void _handleTransformationChange() {
+    if (_ignoringTransformationChange || _viewportWidth == 0) return;
+    final translationX = _transformationController.value.getTranslation().x;
+    if (translationX < -_olderDataTriggerOffset ||
+        _olderDataRequested ||
+        widget.isLoadingOlder ||
+        !widget.hasMoreOlderData ||
+        widget.onNeedOlderData == null) {
+      return;
+    }
+
+    _olderDataRequested = true;
+    widget.onNeedOlderData!();
+  }
+
+  void _setTransformation(double scale, double translationX) {
+    _ignoringTransformationChange = true;
+    _transformationController.value = Matrix4.identity()
+      ..translateByDouble(translationX, 0, 0, 1)
+      ..scaleByDouble(scale, 1, 1, 1);
+    _ignoringTransformationChange = false;
+  }
+
+  void _setInitialViewport() {
+    _setTransformation(_initialScale, -_viewportWidth * (_initialScale - 1));
+    _needsInitialViewport = false;
+  }
+
+  void _zoomBy(double scaleDelta) {
+    if (_viewportWidth == 0) return;
+    final currentMatrix = _transformationController.value;
+    final currentScale = currentMatrix.getMaxScaleOnAxis();
+    final nextScale = (currentScale * scaleDelta).clamp(1.0, _maximumScale);
+    final focalX = _viewportWidth / 2;
+    final currentTranslationX = currentMatrix.getTranslation().x;
+    final focalSceneX = (focalX - currentTranslationX) / currentScale;
+    _setTransformation(nextScale, focalX - nextScale * focalSceneX);
+  }
+
+  void _resetZoom() {
+    _setTransformation(1, 0);
   }
 
   @override
@@ -107,25 +173,27 @@ class _HistoryChartState extends State<HistoryChart> {
           ),
           child: LayoutBuilder(
             builder: (context, viewportConstraints) {
-              final pxPerSecond = _pxPerSecondFor(widget.windowHours);
-              final rangeSeconds = max(widget.axisEnd.difference(widget.axisStart).inSeconds.toDouble(), 3600.0);
-              final estimatedWidth = rangeSeconds * pxPerSecond;
               final plotWidth = viewportConstraints.maxWidth - _frozenAxisWidth;
-              final initialOffset = plotWidth * _initialHiddenFraction;
-              final rightNowBufferWidth = plotWidth * _rightNowBufferFraction;
-              final rightNowBufferSeconds = rightNowBufferWidth / pxPerSecond;
-              final chartWidth = max(
-                estimatedWidth + rightNowBufferWidth,
-                plotWidth + initialOffset,
-              );
-              final bottomTitleSize = widget.windowHours <= 24 ? 32.0 : 40.0;
+              final rightNowBufferSeconds =
+                  _axisRangeSeconds(widget.axisStart, widget.axisEnd) -
+                  max(
+                    widget.axisEnd
+                        .difference(widget.axisStart)
+                        .inSeconds
+                        .toDouble(),
+                    3600.0,
+                  );
+              const bottomTitleSize = 40.0;
+              _viewportWidth = plotWidth;
 
-              if (_needsInitialOffset) {
+              if (_needsInitialViewport) {
                 WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (!_needsInitialOffset || !_scrollController.hasClients) return;
-                  final position = _scrollController.position;
-                  _scrollController.jumpTo(min(initialOffset, position.maxScrollExtent));
-                  _needsInitialOffset = false;
+                  if (!mounted ||
+                      !_needsInitialViewport ||
+                      _viewportWidth == 0) {
+                    return;
+                  }
+                  _setInitialViewport();
                 });
               }
 
@@ -144,26 +212,22 @@ class _HistoryChartState extends State<HistoryChart> {
                   Expanded(
                     child: Stack(
                       children: [
-                        ClipRect(
-                          child: NotificationListener<ScrollNotification>(
-                            onNotification: _handleScrollNotification,
-                            child: SingleChildScrollView(
-                              controller: _scrollController,
-                              scrollDirection: Axis.horizontal,
-                              clipBehavior: Clip.hardEdge,
-                              child: SizedBox(
-                                width: chartWidth,
-                                height: viewportConstraints.maxHeight,
-                                child: Padding(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    0,
-                                    _chartTopPadding,
-                                    24,
-                                    _chartBottomPadding,
-                                  ),
-                                  child: LineChart(_buildChartData(rightNowBufferSeconds)),
-                                ),
-                              ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(
+                            0,
+                            _chartTopPadding,
+                            24,
+                            _chartBottomPadding,
+                          ),
+                          child: LineChart(
+                            _buildChartData(rightNowBufferSeconds),
+                            transformationConfig: FlTransformationConfig(
+                              scaleAxis: FlScaleAxis.horizontal,
+                              minScale: 1,
+                              maxScale: _maximumScale,
+                              trackpadScrollCausesScale: true,
+                              transformationController:
+                                  _transformationController,
                             ),
                           ),
                         ),
@@ -179,13 +243,42 @@ class _HistoryChartState extends State<HistoryChart> {
                           ),
                         ),
                         Positioned(
+                          top: 0,
+                          right: 0,
+                          child: Material(
+                            color: Theme.of(context).scaffoldBackgroundColor,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  tooltip: 'Oddal wykres',
+                                  icon: const Icon(Icons.remove),
+                                  onPressed: () => _zoomBy(1 / 1.5),
+                                ),
+                                IconButton(
+                                  tooltip: 'Przybliż wykres',
+                                  icon: const Icon(Icons.add),
+                                  onPressed: () => _zoomBy(1.5),
+                                ),
+                                IconButton(
+                                  tooltip: 'Pokaż cały tydzień',
+                                  icon: const Icon(Icons.restart_alt),
+                                  onPressed: _resetZoom,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        Positioned(
                           top: _chartTopPadding,
                           right: _frozenAxisWidth,
                           bottom: _chartBottomPadding + bottomTitleSize,
                           child: IgnorePointer(
                             child: Container(
                               width: 1,
-                              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5),
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurface.withValues(alpha: 0.5),
                             ),
                           ),
                         ),
@@ -205,7 +298,10 @@ class _HistoryChartState extends State<HistoryChart> {
                             top: 8,
                             child: Text(
                               'Brak starszych danych',
-                              style: TextStyle(fontSize: 10, color: Colors.black45),
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Colors.black45,
+                              ),
                             ),
                           ),
                       ],
@@ -218,23 +314,6 @@ class _HistoryChartState extends State<HistoryChart> {
         );
       },
     );
-  }
-
-  bool _handleScrollNotification(ScrollNotification notification) {
-    if (notification.metrics.axis != Axis.horizontal || notification is! ScrollUpdateNotification) {
-      return false;
-    }
-    if (notification.metrics.pixels > _olderDataTriggerOffset ||
-        _olderDataRequested ||
-        widget.isLoadingOlder ||
-        !widget.hasMoreOlderData ||
-        widget.onNeedOlderData == null) {
-      return false;
-    }
-
-    _olderDataRequested = true;
-    widget.onNeedOlderData!();
-    return false;
   }
 
   LineChartData _buildChartData(double rightNowBufferSeconds) {
@@ -250,7 +329,12 @@ class _HistoryChartState extends State<HistoryChart> {
     final gapStarts = gaps.map((g) => g.start).toSet();
     final spots = <FlSpot>[];
     for (final m in data) {
-      spots.add(FlSpot(m.measuredAt.millisecondsSinceEpoch / 1000.0, m.sensorValue.toDouble()));
+      spots.add(
+        FlSpot(
+          m.measuredAt.millisecondsSinceEpoch / 1000.0,
+          m.sensorValue.toDouble(),
+        ),
+      );
       if (gapStarts.contains(m.measuredAt)) spots.add(FlSpot.nullSpot);
     }
 
@@ -258,22 +342,7 @@ class _HistoryChartState extends State<HistoryChart> {
     final nowX = widget.axisEnd.millisecondsSinceEpoch / 1000.0;
     final maxX = nowX + rightNowBufferSeconds;
 
-    final double intervalX;
-    final bool showDate;
-    final bool onlyDate;
-    if (widget.windowHours <= 24) {
-      intervalX = 3600;
-      showDate = false;
-      onlyDate = false;
-    } else if (widget.windowHours <= 72) {
-      intervalX = 14400;
-      showDate = true;
-      onlyDate = false;
-    } else {
-      intervalX = 86400;
-      showDate = true;
-      onlyDate = true;
-    }
+    const intervalX = 86400.0;
 
     // Niewidoczne "markery" na środku każdej luki, użyte wyłącznie do trwałego wyświetlenia
     // etykiety z czasem trwania przerwy (przez showingTooltipIndicators fl_chart).
@@ -281,7 +350,9 @@ class _HistoryChartState extends State<HistoryChart> {
     final gapLabelsByX = <double, String>{};
     for (final gap in gaps) {
       final midSeconds =
-          (gap.start.millisecondsSinceEpoch + gap.end.millisecondsSinceEpoch) / 2 / 1000.0;
+          (gap.start.millisecondsSinceEpoch + gap.end.millisecondsSinceEpoch) /
+          2 /
+          1000.0;
       final before = data.lastWhere((m) => m.measuredAt == gap.start);
       final after = data.firstWhere((m) => m.measuredAt == gap.end);
       final midY = (before.sensorValue + after.sensorValue) / 2.0;
@@ -334,23 +405,15 @@ class _HistoryChartState extends State<HistoryChart> {
         bottomTitles: AxisTitles(
           sideTitles: SideTitles(
             showTitles: true,
-            reservedSize: showDate ? 40 : 32,
+            reservedSize: 40,
             interval: intervalX,
             getTitlesWidget: (value, meta) {
               final t = DateTime.fromMillisecondsSinceEpoch(
                 (value * 1000).toInt(),
               ).toLocal();
 
-              final timeStr = '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-
-              String label;
-              if (onlyDate) {
-                label = '${t.day.toString().padLeft(2, '0')}.${t.month.toString().padLeft(2, '0')}';
-              } else if (showDate) {
-                label = '${t.day.toString().padLeft(2, '0')}.${t.month.toString().padLeft(2, '0')}\n$timeStr';
-              } else {
-                label = timeStr;
-              }
+              final label =
+                  '${t.day.toString().padLeft(2, '0')}.${t.month.toString().padLeft(2, '0')}';
 
               return Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -364,7 +427,9 @@ class _HistoryChartState extends State<HistoryChart> {
           ),
         ),
         topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-        rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        rightTitles: const AxisTitles(
+          sideTitles: SideTitles(showTitles: false),
+        ),
       ),
       borderData: FlBorderData(show: true),
       minY: 0,
@@ -420,7 +485,11 @@ class _HistoryChartState extends State<HistoryChart> {
       showingTooltipIndicators: [
         for (final spot in gapMarkers)
           ShowingTooltipIndicators([
-            LineBarSpot(lineBarsData[gapMarkerBarIndex], gapMarkerBarIndex, spot),
+            LineBarSpot(
+              lineBarsData[gapMarkerBarIndex],
+              gapMarkerBarIndex,
+              spot,
+            ),
           ]),
       ],
       lineTouchData: LineTouchData(
@@ -429,10 +498,16 @@ class _HistoryChartState extends State<HistoryChart> {
             if (spot.barIndex == gapMarkerBarIndex) {
               return LineTooltipItem(
                 'Brak danych: ${gapLabelsByX[spot.x] ?? ''}',
-                const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
               );
             }
-            final t = DateTime.fromMillisecondsSinceEpoch((spot.x * 1000).toInt()).toLocal();
+            final t = DateTime.fromMillisecondsSinceEpoch(
+              (spot.x * 1000).toInt(),
+            ).toLocal();
             final dateStr =
                 '${t.day.toString().padLeft(2, '0')}.${t.month.toString().padLeft(2, '0')} '
                 '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
@@ -454,4 +529,3 @@ class _HistoryChartState extends State<HistoryChart> {
     return '${minutes}min';
   }
 }
-

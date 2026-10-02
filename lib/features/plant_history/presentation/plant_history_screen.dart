@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../plant_list/domain/plant_pot.dart';
 import '../providers/history_providers.dart';
 import 'widgets/history_chart.dart';
-import 'widgets/period_selector.dart';
 
 class PlantHistoryScreen extends ConsumerWidget {
   const PlantHistoryScreen({super.key, required this.plant});
@@ -29,31 +28,26 @@ class PlantHistoryScreen extends ConsumerWidget {
       ),
       body: Column(
         children: [
-          PeriodSelector(
-            windowHours: state.windowHours,
-            onSelected: controller.setWindowHours,
-          ),
           Expanded(
-            child: state.isLoading
+            child: state.isLoading && state.measurements.isEmpty
                 ? const Center(child: CircularProgressIndicator())
-                : state.error != null
-                    ? _buildErrorState(controller, state.error!)
-                    : state.measurements.isEmpty
-                        ? const Center(child: Text('Brak danych dla wybranego okresu'))
-                        : HistoryChart(
-                            data: state.measurements,
-                            wetCalibration: plant.wetCalibration,
-                            dryCalibration: plant.dryCalibration,
-                            windowHours: state.windowHours,
-                            axisStart: state.loadedFrom!,
-                            axisEnd: state.loadedTo!,
-                            fallbackExpectedInterval: plant.intervalMinutes != null
-                                ? Duration(minutes: plant.intervalMinutes!)
-                                : null,
-                            isLoadingOlder: state.isLoadingOlder,
-                            hasMoreOlderData: state.hasMoreOlderData,
-                            onNeedOlderData: controller.loadOlder,
-                          ),
+                : state.error != null && state.measurements.isEmpty
+                ? _buildErrorState(controller, state.error!)
+                : state.measurements.isEmpty
+                ? const Center(child: Text('Brak danych dla wybranego okresu'))
+                : HistoryChart(
+                    data: state.measurements,
+                    wetCalibration: plant.wetCalibration,
+                    dryCalibration: plant.dryCalibration,
+                    axisStart: state.loadedFrom!,
+                    axisEnd: state.loadedTo!,
+                    fallbackExpectedInterval: plant.intervalMinutes != null
+                        ? Duration(minutes: plant.intervalMinutes!)
+                        : null,
+                    isLoadingOlder: state.isLoadingOlder,
+                    hasMoreOlderData: state.hasMoreOlderData,
+                    onNeedOlderData: controller.loadOlder,
+                  ),
           ),
         ],
       ),

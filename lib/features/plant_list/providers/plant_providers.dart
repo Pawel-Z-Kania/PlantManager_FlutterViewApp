@@ -2,9 +2,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/plant_repository.dart';
 import '../domain/plant_pot.dart';
 
-final plantRepositoryProvider = Provider<PlantRepository>((ref) => PlantRepository());
+final plantRepositoryProvider = Provider<PlantRepository>(
+  (ref) => PlantRepository(),
+);
 
-final plantsProvider = AsyncNotifierProvider<PlantsNotifier, List<PlantPot>>(PlantsNotifier.new);
+final plantsProvider = AsyncNotifierProvider<PlantsNotifier, List<PlantPot>>(
+  PlantsNotifier.new,
+);
 
 class PlantsNotifier extends AsyncNotifier<List<PlantPot>> {
   @override
@@ -13,8 +17,10 @@ class PlantsNotifier extends AsyncNotifier<List<PlantPot>> {
   }
 
   Future<void> refresh() async {
-    state = const AsyncLoading<List<PlantPot>>().copyWithPrevious(state);
-    state = await AsyncValue.guard(() => ref.read(plantRepositoryProvider).fetchPlants());
+    state = const AsyncLoading<List<PlantPot>>();
+    state = await AsyncValue.guard(
+      () => ref.read(plantRepositoryProvider).fetchPlants(),
+    );
   }
 
   /// Zapisuje ustawienia doniczki i odświeża listę; rzuca wyjątek dalej, żeby UI mógł go pokazać.
