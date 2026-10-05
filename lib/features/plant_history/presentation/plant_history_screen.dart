@@ -39,8 +39,9 @@ class PlantHistoryScreen extends ConsumerWidget {
                     data: state.measurements,
                     wetCalibration: plant.wetCalibration,
                     dryCalibration: plant.dryCalibration,
-                    axisStart: state.loadedFrom!,
-                    axisEnd: state.loadedTo!,
+                    loadedFrom: state.loadedFrom!,
+                    loadedTo: state.loadedTo!,
+                    earliestAllowed: state.loadedTo!.subtract(historyMaxDepth),
                     fallbackExpectedInterval: plant.intervalMinutes != null
                         ? Duration(minutes: plant.intervalMinutes!)
                         : null,

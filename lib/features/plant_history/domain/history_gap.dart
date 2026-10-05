@@ -7,3 +7,11 @@ class DataGap {
 
   Duration get duration => end.difference(start);
 }
+
+String formatGapDuration(Duration d) {
+  final hours = d.inHours;
+  final minutes = d.inMinutes % 60;
+  if (hours > 0 && minutes > 0) return '${hours}h ${minutes}min';
+  if (hours > 0) return '${hours}h';
+  return '${minutes}min';
+}

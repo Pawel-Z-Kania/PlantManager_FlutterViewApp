@@ -1,24 +1,27 @@
-import 'dart:math';
-import 'package:fl_chart/fl_chart.dart';
+import 'dart:async';
+import 'dart:math' as math;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import '../../domain/history_gap_detector.dart';
+import 'package:flutter/physics.dart';
+import 'package:flutter/scheduler.dart';
 import '../../domain/history_measurement.dart';
+import '../../domain/history_series.dart';
+import '../../domain/history_viewport.dart';
+import 'frozen_voltage_axis.dart';
 import 'frozen_y_axis.dart';
+import 'history_chart_painter.dart';
 
-/// Próg luki = mediana odstępów (lub fallback) pomnożona przez ten współczynnik.
-const _gapFactor = 3.5;
-
-/// Odstęp linii siatki pionowej — 12h w sekundach, licząc od epoki, więc zawsze wypada o 00:00/12:00 czasu lokalnego.
-const _verticalGridIntervalSeconds = 12 * 3600.0;
-
+/// Wykres historii z widokiem zależnym wyłącznie od czasu: dociągnięte starsze dane
+/// dorysowują się po lewej bez zmiany pozycji i skali widoku.
 class HistoryChart extends StatefulWidget {
   const HistoryChart({
     super.key,
     required this.data,
     required this.wetCalibration,
     required this.dryCalibration,
-    required this.axisStart,
-    required this.axisEnd,
+    required this.loadedFrom,
+    required this.loadedTo,
+    required this.earliestAllowed,
     this.fallbackExpectedInterval,
     this.isLoadingOlder = false,
     this.hasMoreOlderData = true,
@@ -28,8 +31,13 @@ class HistoryChart extends StatefulWidget {
   final List<HistoryMeasurement> data;
   final int wetCalibration;
   final int dryCalibration;
-  final DateTime axisStart;
-  final DateTime axisEnd;
+  final DateTime loadedFrom;
+
+  /// Moment ostatniego pobrania ("teraz" na osi).
+  final DateTime loadedTo;
+
+  /// Najstarszy moment, do którego można przewinąć wykres.
+  final DateTime earliestAllowed;
   final Duration? fallbackExpectedInterval;
   final bool isLoadingOlder;
   final bool hasMoreOlderData;
@@ -39,493 +47,343 @@ class HistoryChart extends StatefulWidget {
   State<HistoryChart> createState() => _HistoryChartState();
 }
 
-class _HistoryChartState extends State<HistoryChart> {
+class _HistoryChartState extends State<HistoryChart>
+    with SingleTickerProviderStateMixin {
   static const _screenHorizontalPadding = 16.0;
-  static const _frozenAxisWidth = 48.0;
-  static const _chartTopPadding = 24.0;
-  static const _chartBottomPadding = 16.0;
-  static const _yAxisInterval = 256.0;
-  static const _initialScale = 2.0;
-  static const _maximumScale = 8.0;
-  static const _rightNowBufferFraction = 0.15;
-  static const _olderDataTriggerOffset = 8.0;
+  static const _axisWidth = 48.0;
+  static const _initialSpan = Duration(hours: 96);
+  static const _minSpan = Duration(hours: 6);
+  static const _maxSpan = Duration(days: 14);
+  static const _rightBuffer = Duration(hours: 6);
+  static const _selectionRadius = 32.0;
+  static const _retryDelay = Duration(seconds: 5);
+  static const _flingDrag = 0.135;
 
-  final TransformationController _transformationController =
-      TransformationController();
-  bool _needsInitialViewport = true;
-  bool _olderDataRequested = false;
-  bool _ignoringTransformationChange = false;
-  double _viewportWidth = 0;
+  late HistorySeries _series;
+  late final ValueNotifier<HistoryViewport> _viewport;
+  final ValueNotifier<double?> _selectedTimeMs = ValueNotifier(null);
+  late final AnimationController _fling;
+
+  double _plotWidth = 0;
+  double _flingLast = 0;
+  double _gestureFocalTimeMs = 0;
+  double _gestureStartSpanMs = 0;
+  bool _olderRequested = false;
+  DateTime? _retryAfter;
+
+  HistoryBounds get _bounds => HistoryBounds(
+    minMs: widget.earliestAllowed.millisecondsSinceEpoch.toDouble(),
+    maxMs:
+        widget.loadedTo.millisecondsSinceEpoch.toDouble() +
+        _rightBuffer.inMilliseconds,
+    minSpanMs: _minSpan.inMilliseconds.toDouble(),
+    maxSpanMs: _maxSpan.inMilliseconds.toDouble(),
+  );
+
+  HistoryViewport get _initialViewport {
+    final bounds = _bounds;
+    return HistoryViewport(
+      startMs: bounds.maxMs - _initialSpan.inMilliseconds,
+      spanMs: _initialSpan.inMilliseconds.toDouble(),
+    ).clamped(bounds);
+  }
 
   @override
   void initState() {
     super.initState();
-    _transformationController.addListener(_handleTransformationChange);
+    _series = _buildSeries();
+    _viewport = ValueNotifier(_initialViewport)
+      ..addListener(_checkPrefetchOlder);
+    _fling = AnimationController.unbounded(vsync: this)
+      ..addListener(_onFlingTick);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkPrefetchOlder());
   }
 
   @override
   void didUpdateWidget(covariant HistoryChart oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.axisStart.isBefore(oldWidget.axisStart)) {
-      final addedSeconds = oldWidget.axisStart
-          .difference(widget.axisStart)
-          .inSeconds
-          .toDouble();
-      final oldRangeSeconds = _axisRangeSeconds(
-        oldWidget.axisStart,
-        oldWidget.axisEnd,
-      );
-      final newRangeSeconds = _axisRangeSeconds(
-        widget.axisStart,
-        widget.axisEnd,
-      );
-      final scale = _transformationController.value.getMaxScaleOnAxis();
-      final oldTranslationX = _transformationController.value
-          .getTranslation()
-          .x;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || _viewportWidth == 0) return;
-        final oldVisibleFraction = (-oldTranslationX / (scale * _viewportWidth))
-            .clamp(0.0, 1.0);
-        final newVisibleFraction =
-            ((addedSeconds + oldVisibleFraction * oldRangeSeconds) /
-                    newRangeSeconds)
-                .clamp(0.0, 1.0);
-        _setTransformation(scale, -newVisibleFraction * scale * _viewportWidth);
-      });
+    if (!identical(oldWidget.data, widget.data) ||
+        oldWidget.fallbackExpectedInterval != widget.fallbackExpectedInterval) {
+      _series = _buildSeries();
     }
-    if (!widget.isLoadingOlder && oldWidget.isLoadingOlder) {
-      _olderDataRequested = false;
+
+    if (oldWidget.loadedTo != widget.loadedTo) {
+      _fling.stop();
+      _viewport.value = _initialViewport;
+      _selectedTimeMs.value = null;
+      _olderRequested = false;
+      _retryAfter = null;
+    }
+
+    if (oldWidget.isLoadingOlder && !widget.isLoadingOlder) {
+      _olderRequested = false;
+      if (oldWidget.loadedFrom == widget.loadedFrom) {
+        // Żądanie nie przyniosło danych (błąd): nie ponawiamy w pętli.
+        _retryAfter = DateTime.now().add(_retryDelay);
+      } else {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _checkPrefetchOlder(),
+        );
+      }
     }
   }
 
   @override
   void dispose() {
-    _transformationController
-      ..removeListener(_handleTransformationChange)
+    _fling.dispose();
+    _viewport
+      ..removeListener(_checkPrefetchOlder)
       ..dispose();
+    _selectedTimeMs.dispose();
     super.dispose();
   }
 
-  double _axisRangeSeconds(DateTime start, DateTime end) {
-    final rangeSeconds = max(
-      end.difference(start).inSeconds.toDouble(),
-      3600.0,
-    );
-    return rangeSeconds * (1 + _rightNowBufferFraction);
-  }
+  HistorySeries _buildSeries() => HistorySeries.fromMeasurements(
+    widget.data,
+    fallbackExpectedInterval: widget.fallbackExpectedInterval,
+  );
 
-  void _handleTransformationChange() {
-    if (_ignoringTransformationChange || _viewportWidth == 0) return;
-    final translationX = _transformationController.value.getTranslation().x;
-    if (translationX < -_olderDataTriggerOffset ||
-        _olderDataRequested ||
-        widget.isLoadingOlder ||
-        !widget.hasMoreOlderData ||
-        widget.onNeedOlderData == null) {
+  void _checkPrefetchOlder() {
+    // Zmiana stanu dostawcy w trakcie budowania drzewa jest niedozwolona.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _checkPrefetchOlder(),
+      );
       return;
     }
-
-    _olderDataRequested = true;
-    widget.onNeedOlderData!();
+    final onNeedOlderData = widget.onNeedOlderData;
+    if (!mounted ||
+        onNeedOlderData == null ||
+        _olderRequested ||
+        widget.isLoadingOlder) {
+      return;
+    }
+    final retryAfter = _retryAfter;
+    if (retryAfter != null && DateTime.now().isBefore(retryAfter)) return;
+    if (!shouldPrefetchOlder(
+      viewport: _viewport.value,
+      loadedFrom: widget.loadedFrom,
+      hasMoreOlderData: widget.hasMoreOlderData,
+    )) {
+      return;
+    }
+    _olderRequested = true;
+    onNeedOlderData();
   }
 
-  void _setTransformation(double scale, double translationX) {
-    _ignoringTransformationChange = true;
-    _transformationController.value = Matrix4.identity()
-      ..translateByDouble(translationX, 0, 0, 1)
-      ..scaleByDouble(scale, 1, 1, 1);
-    _ignoringTransformationChange = false;
+  bool _panBy(double dx) {
+    if (_plotWidth <= 0) return false;
+    final current = _viewport.value;
+    final next = current.panBy(dx, _plotWidth, _bounds);
+    if (next == current) return false;
+    _viewport.value = next;
+    return true;
   }
 
-  void _setInitialViewport() {
-    _setTransformation(_initialScale, -_viewportWidth * (_initialScale - 1));
-    _needsInitialViewport = false;
+  void _zoomAt(double factor, double focalX) {
+    if (_plotWidth <= 0) return;
+    _viewport.value = _viewport.value.zoomAt(
+      factor,
+      focalX,
+      _plotWidth,
+      _bounds,
+    );
   }
 
-  void _zoomBy(double scaleDelta) {
-    if (_viewportWidth == 0) return;
-    final currentMatrix = _transformationController.value;
-    final currentScale = currentMatrix.getMaxScaleOnAxis();
-    final nextScale = (currentScale * scaleDelta).clamp(1.0, _maximumScale);
-    final focalX = _viewportWidth / 2;
-    final currentTranslationX = currentMatrix.getTranslation().x;
-    final focalSceneX = (focalX - currentTranslationX) / currentScale;
-    _setTransformation(nextScale, focalX - nextScale * focalSceneX);
+  void _onScaleStart(ScaleStartDetails details) {
+    _fling.stop();
+    final viewport = _viewport.value;
+    _gestureStartSpanMs = viewport.spanMs;
+    _gestureFocalTimeMs = viewport.timeAt(
+      details.localFocalPoint.dx,
+      _plotWidth,
+    );
   }
 
-  void _resetZoom() {
-    _setTransformation(1, 0);
+  void _onScaleUpdate(ScaleUpdateDetails details) {
+    if (_plotWidth <= 0) return;
+    final focalX = details.localFocalPoint.dx;
+    final next = HistoryViewport.anchored(
+      focalTimeMs: _gestureFocalTimeMs,
+      focalX: focalX,
+      spanMs: _gestureStartSpanMs / math.max(details.scale, 0.05),
+      plotWidth: _plotWidth,
+      bounds: _bounds,
+    );
+    _viewport.value = next;
+    // Po dojściu do granicy kotwica musi podążać za palcem, a nie za utraconą pozycją.
+    _gestureFocalTimeMs = next.timeAt(focalX, _plotWidth);
+  }
+
+  void _onScaleEnd(ScaleEndDetails details) {
+    if (details.pointerCount > 0) return;
+    final velocity = details.velocity.pixelsPerSecond.dx;
+    if (velocity.abs() < kMinFlingVelocity) return;
+    _flingLast = 0;
+    unawaited(_fling.animateWith(FrictionSimulation(_flingDrag, 0, velocity)));
+  }
+
+  void _onFlingTick() {
+    final delta = _fling.value - _flingLast;
+    _flingLast = _fling.value;
+    if (delta == 0) return;
+    if (!_panBy(delta)) _fling.stop();
+  }
+
+  void _onPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    GestureBinding.instance.pointerSignalResolver.register(event, (resolved) {
+      final scroll = resolved as PointerScrollEvent;
+      _fling.stop();
+      if (scroll.scrollDelta.dx.abs() > scroll.scrollDelta.dy.abs()) {
+        _panBy(-scroll.scrollDelta.dx);
+      } else {
+        _zoomAt(math.exp(-scroll.scrollDelta.dy / 300), scroll.localPosition.dx);
+      }
+    });
+  }
+
+  void _selectAt(double x) {
+    if (_plotWidth <= 0 || _series.length == 0) return;
+    final viewport = _viewport.value;
+    final i = _series.nearestIndex(viewport.timeAt(x, _plotWidth));
+    final pointX = viewport.xFor(_series.times[i], _plotWidth);
+    _selectedTimeMs.value = (pointX - x).abs() <= _selectionRadius
+        ? _series.times[i]
+        : null;
+  }
+
+  void _zoomButton(double factor) {
+    _fling.stop();
+    _zoomAt(factor, _plotWidth / 2);
+  }
+
+  void _resetViewport() {
+    _fling.stop();
+    _viewport.value = _initialViewport;
   }
 
   @override
   Widget build(BuildContext context) {
     if (widget.data.isEmpty) return const SizedBox.shrink();
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(
-            _screenHorizontalPadding,
-            0,
-            _screenHorizontalPadding,
-            _screenHorizontalPadding,
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        _screenHorizontalPadding,
+        0,
+        _screenHorizontalPadding,
+        _screenHorizontalPadding,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            width: _axisWidth,
+            child: FrozenYAxis(
+              topPadding: historyChartTopPadding,
+              bottomPadding: historyChartBottomPadding,
+              wetCalibration: widget.wetCalibration,
+              dryCalibration: widget.dryCalibration,
+            ),
           ),
-          child: LayoutBuilder(
-            builder: (context, viewportConstraints) {
-              final plotWidth = viewportConstraints.maxWidth - _frozenAxisWidth;
-              final rightNowBufferSeconds =
-                  _axisRangeSeconds(widget.axisStart, widget.axisEnd) -
-                  max(
-                    widget.axisEnd
-                        .difference(widget.axisStart)
-                        .inSeconds
-                        .toDouble(),
-                    3600.0,
-                  );
-              const bottomTitleSize = 40.0;
-              _viewportWidth = plotWidth;
-
-              if (_needsInitialViewport) {
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (!mounted ||
-                      !_needsInitialViewport ||
-                      _viewportWidth == 0) {
-                    return;
-                  }
-                  _setInitialViewport();
-                });
-              }
-
-              return Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  SizedBox(
-                    width: _frozenAxisWidth,
-                    child: FrozenYAxis(
-                      topPadding: _chartTopPadding,
-                      bottomPadding: _chartBottomPadding + bottomTitleSize,
-                      wetCalibration: widget.wetCalibration,
-                      dryCalibration: widget.dryCalibration,
-                    ),
-                  ),
-                  Expanded(
-                    child: Stack(
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(
-                            0,
-                            _chartTopPadding,
-                            24,
-                            _chartBottomPadding,
-                          ),
-                          child: LineChart(
-                            _buildChartData(rightNowBufferSeconds),
-                            transformationConfig: FlTransformationConfig(
-                              scaleAxis: FlScaleAxis.horizontal,
-                              minScale: 1,
-                              maxScale: _maximumScale,
-                              trackpadScrollCausesScale: true,
-                              transformationController:
-                                  _transformationController,
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          top: 0,
-                          right: 0,
-                          bottom: 0,
-                          width: _frozenAxisWidth,
-                          child: IgnorePointer(
-                            child: Container(
-                              color: Theme.of(context).scaffoldBackgroundColor,
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          top: 0,
-                          right: 0,
-                          child: Material(
-                            color: Theme.of(context).scaffoldBackgroundColor,
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  tooltip: 'Oddal wykres',
-                                  icon: const Icon(Icons.remove),
-                                  onPressed: () => _zoomBy(1 / 1.5),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                _plotWidth = constraints.maxWidth;
+                return Stack(
+                  children: [
+                    Positioned.fill(
+                      child: Listener(
+                        onPointerSignal: _onPointerSignal,
+                        child: MouseRegion(
+                          onHover: (event) => _selectAt(event.localPosition.dx),
+                          onExit: (_) => _selectedTimeMs.value = null,
+                          child: GestureDetector(
+                            key: const ValueKey('history-chart-plot'),
+                            behavior: HitTestBehavior.opaque,
+                            onScaleStart: _onScaleStart,
+                            onScaleUpdate: _onScaleUpdate,
+                            onScaleEnd: _onScaleEnd,
+                            onTapUp: (details) =>
+                                _selectAt(details.localPosition.dx),
+                            child: RepaintBoundary(
+                              child: CustomPaint(
+                                painter: HistoryChartPainter(
+                                  series: _series,
+                                  viewport: _viewport,
+                                  selectedTimeMs: _selectedTimeMs,
+                                  wetCalibration: widget.wetCalibration,
+                                  dryCalibration: widget.dryCalibration,
+                                  loadedFromMs: widget
+                                      .loadedFrom
+                                      .millisecondsSinceEpoch
+                                      .toDouble(),
+                                  nowMs: widget.loadedTo.millisecondsSinceEpoch
+                                      .toDouble(),
+                                  textColor: theme.colorScheme.onSurface,
                                 ),
-                                IconButton(
-                                  tooltip: 'Przybliż wykres',
-                                  icon: const Icon(Icons.add),
-                                  onPressed: () => _zoomBy(1.5),
-                                ),
-                                IconButton(
-                                  tooltip: 'Pokaż cały tydzień',
-                                  icon: const Icon(Icons.restart_alt),
-                                  onPressed: _resetZoom,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          top: _chartTopPadding,
-                          right: _frozenAxisWidth,
-                          bottom: _chartBottomPadding + bottomTitleSize,
-                          child: IgnorePointer(
-                            child: Container(
-                              width: 1,
-                              color: Theme.of(
-                                context,
-                              ).colorScheme.onSurface.withValues(alpha: 0.5),
-                            ),
-                          ),
-                        ),
-                        if (widget.isLoadingOlder)
-                          const Positioned(
-                            left: 4,
-                            top: 8,
-                            child: SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                          ),
-                        if (!widget.isLoadingOlder && !widget.hasMoreOlderData)
-                          const Positioned(
-                            left: 4,
-                            top: 8,
-                            child: Text(
-                              'Brak starszych danych',
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: Colors.black45,
                               ),
                             ),
                           ),
-                      ],
+                        ),
+                      ),
                     ),
-                  ),
-                ],
-              );
-            },
-          ),
-        );
-      },
-    );
-  }
-
-  LineChartData _buildChartData(double rightNowBufferSeconds) {
-    final data = widget.data;
-    final gaps = detectGaps(
-      data,
-      factor: _gapFactor,
-      fallbackExpectedInterval: widget.fallbackExpectedInterval,
-    );
-
-    // Pojedyncza seria z FlSpot.nullSpot w miejscach luk — fl_chart realnie przerywa
-    // linię w tym miejscu, zamiast łączyć punkty po przekątnej przez okres bez danych.
-    final gapStarts = gaps.map((g) => g.start).toSet();
-    final spots = <FlSpot>[];
-    for (final m in data) {
-      spots.add(
-        FlSpot(
-          m.measuredAt.millisecondsSinceEpoch / 1000.0,
-          m.sensorValue.toDouble(),
-        ),
-      );
-      if (gapStarts.contains(m.measuredAt)) spots.add(FlSpot.nullSpot);
-    }
-
-    final minX = widget.axisStart.millisecondsSinceEpoch / 1000.0;
-    final nowX = widget.axisEnd.millisecondsSinceEpoch / 1000.0;
-    final maxX = nowX + rightNowBufferSeconds;
-
-    const intervalX = 86400.0;
-
-    // Niewidoczne "markery" na środku każdej luki, użyte wyłącznie do trwałego wyświetlenia
-    // etykiety z czasem trwania przerwy (przez showingTooltipIndicators fl_chart).
-    final gapMarkers = <FlSpot>[];
-    final gapLabelsByX = <double, String>{};
-    for (final gap in gaps) {
-      final midSeconds =
-          (gap.start.millisecondsSinceEpoch + gap.end.millisecondsSinceEpoch) /
-          2 /
-          1000.0;
-      final before = data.lastWhere((m) => m.measuredAt == gap.start);
-      final after = data.firstWhere((m) => m.measuredAt == gap.end);
-      final midY = (before.sensorValue + after.sensorValue) / 2.0;
-      gapMarkers.add(FlSpot(midSeconds, midY));
-      gapLabelsByX[midSeconds] = _formatGapDuration(gap.duration);
-    }
-
-    final lineBarsData = <LineChartBarData>[
-      LineChartBarData(
-        spots: spots,
-        isCurved: false,
-        color: Colors.green.shade600,
-        barWidth: 2,
-        dotData: FlDotData(show: data.length <= 40),
-        belowBarData: BarAreaData(
-          show: true,
-          color: Colors.green.shade600.withValues(alpha: 0.1),
-        ),
-      ),
-      if (gapMarkers.isNotEmpty)
-        LineChartBarData(
-          spots: gapMarkers,
-          color: Colors.transparent,
-          barWidth: 0,
-          dotData: const FlDotData(show: false),
-        ),
-    ];
-    const gapMarkerBarIndex = 1;
-
-    return LineChartData(
-      minX: minX,
-      maxX: maxX,
-      gridData: FlGridData(
-        show: true,
-        horizontalInterval: _yAxisInterval,
-        verticalInterval: _verticalGridIntervalSeconds,
-        getDrawingHorizontalLine: (value) => FlLine(
-          color: Colors.blueGrey.withValues(alpha: 0.15),
-          strokeWidth: 0.4,
-          dashArray: const [8, 4],
-        ),
-        getDrawingVerticalLine: (value) => FlLine(
-          color: Colors.blueGrey.withValues(alpha: 0.15),
-          strokeWidth: 0.4,
-          dashArray: const [8, 4],
-        ),
-      ),
-      titlesData: FlTitlesData(
-        leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-        bottomTitles: AxisTitles(
-          sideTitles: SideTitles(
-            showTitles: true,
-            reservedSize: 40,
-            interval: intervalX,
-            getTitlesWidget: (value, meta) {
-              final t = DateTime.fromMillisecondsSinceEpoch(
-                (value * 1000).toInt(),
-              ).toLocal();
-
-              final label =
-                  '${t.day.toString().padLeft(2, '0')}.${t.month.toString().padLeft(2, '0')}';
-
-              return Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  label,
-                  style: const TextStyle(fontSize: 9),
-                  textAlign: TextAlign.center,
-                ),
-              );
-            },
-          ),
-        ),
-        topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-        rightTitles: const AxisTitles(
-          sideTitles: SideTitles(showTitles: false),
-        ),
-      ),
-      borderData: FlBorderData(show: true),
-      minY: 0,
-      maxY: 1024,
-      extraLinesData: ExtraLinesData(
-        verticalLines: [
-          VerticalLine(
-            x: nowX,
-            color: Colors.green.shade800.withValues(alpha: 0.8),
-            strokeWidth: 2,
-          ),
-        ],
-        horizontalLines: [
-          HorizontalLine(
-            y: widget.wetCalibration.toDouble(),
-            color: Colors.blue.withValues(alpha: 0.5),
-            strokeWidth: 2,
-            dashArray: [5, 5],
-            label: HorizontalLineLabel(
-              show: false,
-              alignment: Alignment.topRight,
-              padding: const EdgeInsets.only(right: 5, bottom: 5),
-              style: const TextStyle(color: Colors.blue, fontSize: 10),
-              labelResolver: (line) => 'Mokro',
+                    Positioned(
+                      top: 0,
+                      right: 0,
+                      child: Material(
+                        color: theme.scaffoldBackgroundColor,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'Oddal wykres',
+                              icon: const Icon(Icons.remove),
+                              onPressed: () => _zoomButton(1 / 1.5),
+                            ),
+                            IconButton(
+                              tooltip: 'Przybliż wykres',
+                              icon: const Icon(Icons.add),
+                              onPressed: () => _zoomButton(1.5),
+                            ),
+                            IconButton(
+                              tooltip: 'Pokaż ostatnie dni',
+                              icon: const Icon(Icons.restart_alt),
+                              onPressed: _resetViewport,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (widget.isLoadingOlder)
+                      const Positioned(
+                        left: 4,
+                        top: 8,
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
+                    if (!widget.isLoadingOlder && !widget.hasMoreOlderData)
+                      const Positioned(
+                        left: 4,
+                        top: 8,
+                        child: Text(
+                          'Brak starszych danych',
+                          style: TextStyle(fontSize: 10, color: Colors.black45),
+                        ),
+                      ),
+                  ],
+                );
+              },
             ),
           ),
-          HorizontalLine(
-            y: widget.dryCalibration.toDouble(),
-            color: Colors.orange.withValues(alpha: 0.5),
-            strokeWidth: 2,
-            dashArray: [5, 5],
-            label: HorizontalLineLabel(
-              show: false,
-              alignment: Alignment.bottomRight,
-              padding: const EdgeInsets.only(right: 5, top: 5),
-              style: const TextStyle(color: Colors.orange, fontSize: 10),
-              labelResolver: (line) => 'Sucho',
-            ),
-          ),
+          const SizedBox(width: _axisWidth, child: FrozenVoltageAxis()),
         ],
       ),
-      rangeAnnotations: RangeAnnotations(
-        verticalRangeAnnotations: [
-          for (final gap in gaps)
-            VerticalRangeAnnotation(
-              x1: gap.start.millisecondsSinceEpoch / 1000.0,
-              x2: gap.end.millisecondsSinceEpoch / 1000.0,
-              color: Colors.grey.withValues(alpha: 0.18),
-            ),
-        ],
-      ),
-      lineBarsData: lineBarsData,
-      showingTooltipIndicators: [
-        for (final spot in gapMarkers)
-          ShowingTooltipIndicators([
-            LineBarSpot(
-              lineBarsData[gapMarkerBarIndex],
-              gapMarkerBarIndex,
-              spot,
-            ),
-          ]),
-      ],
-      lineTouchData: LineTouchData(
-        touchTooltipData: LineTouchTooltipData(
-          getTooltipItems: (touchedSpots) => touchedSpots.map((spot) {
-            if (spot.barIndex == gapMarkerBarIndex) {
-              return LineTooltipItem(
-                'Brak danych: ${gapLabelsByX[spot.x] ?? ''}',
-                const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                  fontWeight: FontWeight.bold,
-                ),
-              );
-            }
-            final t = DateTime.fromMillisecondsSinceEpoch(
-              (spot.x * 1000).toInt(),
-            ).toLocal();
-            final dateStr =
-                '${t.day.toString().padLeft(2, '0')}.${t.month.toString().padLeft(2, '0')} '
-                '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-            return LineTooltipItem(
-              '$dateStr\n${spot.y.toInt()} ADC',
-              const TextStyle(color: Colors.white, fontSize: 10),
-            );
-          }).toList(),
-        ),
-      ),
     );
-  }
-
-  String _formatGapDuration(Duration d) {
-    final hours = d.inHours;
-    final minutes = d.inMinutes % 60;
-    if (hours > 0 && minutes > 0) return '${hours}h ${minutes}min';
-    if (hours > 0) return '${hours}h';
-    return '${minutes}min';
   }
 }

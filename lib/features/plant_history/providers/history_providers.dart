@@ -5,9 +5,10 @@ import '../domain/history_measurement.dart';
 const historyWindowHours = 168;
 const historyWindowBucketMinutes = 30;
 
-/// Limit liczby doładowanych "kawałków" historii trzymanych w pamięci jednocześnie,
-/// żeby bardzo długie przewijanie wstecz w jednej sesji nie rosło w nieskończoność.
-const _maxLoadedWindows = 6;
+/// Maksymalna głębokość historii (w oknach po [historyWindowHours]) dostępna w widoku: ok. pół roku.
+const historyMaxWindows = 26;
+
+const historyMaxDepth = Duration(hours: historyWindowHours * historyMaxWindows);
 
 class HistoryWindowState {
   final List<HistoryMeasurement> measurements;
@@ -54,7 +55,6 @@ class HistoryWindowController extends Notifier<HistoryWindowState> {
   HistoryWindowController(this._boardId);
 
   final String _boardId;
-  int _loadedChunks = 0;
   int _requestVersion = 0;
 
   HistoryRepository get _repository => ref.read(historyRepositoryProvider);
@@ -67,7 +67,11 @@ class HistoryWindowController extends Notifier<HistoryWindowState> {
 
   Future<void> _loadInitial() async {
     final requestVersion = ++_requestVersion;
-    state = state.copyWith(isLoading: true, clearError: true);
+    state = state.copyWith(
+      isLoading: true,
+      isLoadingOlder: false,
+      clearError: true,
+    );
     final to = DateTime.now();
     final from = to.subtract(const Duration(hours: historyWindowHours));
     try {
@@ -78,7 +82,6 @@ class HistoryWindowController extends Notifier<HistoryWindowState> {
         bucketMinutes: historyWindowBucketMinutes,
       );
       if (!ref.mounted || requestVersion != _requestVersion) return;
-      _loadedChunks = 1;
       state = state.copyWith(
         measurements: data,
         loadedFrom: from,
@@ -93,22 +96,30 @@ class HistoryWindowController extends Notifier<HistoryWindowState> {
   }
 
   Future<void> refreshToNow() async {
-    _loadedChunks = 0;
     await _loadInitial();
   }
 
   /// Doładowuje wcześniejszy, przyległy fragment historii i dokleja go z przodu listy.
   Future<void> loadOlder() async {
+    final loadedTo = state.loadedTo;
+    final to = state.loadedFrom;
     if (state.isLoadingOlder ||
         !state.hasMoreOlderData ||
-        state.loadedFrom == null) {
+        to == null ||
+        loadedTo == null) {
+      return;
+    }
+
+    final earliest = loadedTo.subtract(historyMaxDepth);
+    if (!to.isAfter(earliest)) {
+      state = state.copyWith(hasMoreOlderData: false);
       return;
     }
 
     final requestVersion = _requestVersion;
     state = state.copyWith(isLoadingOlder: true, clearError: true);
-    final to = state.loadedFrom!;
-    final from = to.subtract(const Duration(hours: historyWindowHours));
+    final windowStart = to.subtract(const Duration(hours: historyWindowHours));
+    final from = windowStart.isBefore(earliest) ? earliest : windowStart;
     try {
       final older = await _repository.fetchHistory(
         _boardId,
@@ -121,22 +132,11 @@ class HistoryWindowController extends Notifier<HistoryWindowState> {
         state = state.copyWith(isLoadingOlder: false, hasMoreOlderData: false);
         return;
       }
-      _loadedChunks++;
-      var merged = _mergeMeasurements(older, state.measurements);
-      if (_loadedChunks > _maxLoadedWindows) {
-        // Obcinamy najnowszy (dalszy od aktualnie oglądanej, wcześniejszej krawędzi) koniec,
-        // żeby nie trzymać w pamięci więcej niż _maxLoadedWindows okien naraz.
-        final keepUntil = from.add(
-          const Duration(hours: historyWindowHours * _maxLoadedWindows),
-        );
-        merged = merged.where((m) => m.measuredAt.isBefore(keepUntil)).toList();
-        _loadedChunks = _maxLoadedWindows;
-      }
       state = state.copyWith(
-        measurements: merged,
+        measurements: _mergeMeasurements(older, state.measurements),
         loadedFrom: from,
         isLoadingOlder: false,
-        hasMoreOlderData: true,
+        hasMoreOlderData: from.isAfter(earliest),
       );
     } catch (e) {
       if (!ref.mounted || requestVersion != _requestVersion) return;
