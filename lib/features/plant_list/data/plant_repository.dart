@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../../../core/config/env.dart';
 import '../domain/plant_pot.dart';
+import '../domain/plant_type.dart';
 
 class PlantRepository {
   Future<List<PlantPot>> fetchPlants() async {
@@ -15,10 +16,29 @@ class PlantRepository {
     }
 
     final List data = jsonDecode(response.body);
-    return [for (final row in data) _mapRow(Map<String, dynamic>.from(row))];
+    return [for (final row in data) mapRow(Map<String, dynamic>.from(row))];
   }
 
-  Future<void> updateSettings(String id, String name, int dry, int wet) async {
+  Future<List<PlantType>> fetchPlantTypes() async {
+    final uri = Uri.parse('${Env.vercelApiUrl}/api/plant-types');
+    final response = await http.get(uri).timeout(const Duration(seconds: 6));
+
+    if (response.statusCode != 200) {
+      debugPrint('[PlantRepository] GET $uri -> ${response.statusCode}: ${response.body}');
+      throw Exception('Błąd serwera: ${response.statusCode}');
+    }
+
+    final List data = jsonDecode(response.body);
+    return [for (final row in data) PlantType.fromJson(Map<String, dynamic>.from(row))];
+  }
+
+  Future<void> updateSettings(
+    String id,
+    String name,
+    int dry,
+    int wet, {
+    String? plantType,
+  }) async {
     final uri = Uri.parse('${Env.vercelApiUrl}/api/update-pot');
     final response = await http.put(
       uri,
@@ -28,6 +48,7 @@ class PlantRepository {
         'name': name,
         'dry_calibration_value': dry,
         'wet_calibration_value': wet,
+        'plant_type': ?plantType,
       }),
     ).timeout(const Duration(seconds: 10));
 
@@ -37,7 +58,8 @@ class PlantRepository {
     }
   }
 
-  PlantPot _mapRow(Map<String, dynamic> row) {
+  @visibleForTesting
+  PlantPot mapRow(Map<String, dynamic> row) {
     final List measurements = row['pot_measurements'] ?? [];
     final int latestVal = measurements.isNotEmpty ? measurements[0]['sensor_value'] as int : 0;
 
@@ -66,6 +88,14 @@ class PlantRepository {
       batteryMv: batteryMv,
       intervalMinutes: intervalMinutes,
       alerts: alerts,
+      plantType: row['plant_type']?.toString() ?? unknownPlantType,
+      lastWateredAt: _parseLocalDate(row['last_watered_at']),
+      nextWateredDate: _parseLocalDate(row['next_watered_date']),
     );
+  }
+
+  DateTime? _parseLocalDate(Object? value) {
+    if (value == null) return null;
+    return DateTime.tryParse(value.toString())?.toLocal();
   }
 }

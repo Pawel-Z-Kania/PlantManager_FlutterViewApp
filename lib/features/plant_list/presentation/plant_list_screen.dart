@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../plant_history/presentation/plant_history_screen.dart';
 import '../domain/plant_pot.dart';
+import '../domain/plant_type.dart';
 import '../providers/plant_providers.dart';
 import 'widgets/plant_card.dart';
 import 'widgets/plant_settings_sheet.dart';
@@ -12,6 +13,7 @@ class PlantListScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final plantsAsync = ref.watch(plantsProvider);
+    final now = ref.watch(minuteClockProvider).value ?? DateTime.now();
 
     return Scaffold(
       appBar: AppBar(
@@ -39,6 +41,7 @@ class PlantListScreen extends ConsumerWidget {
                   final plant = plants[index];
                   return PlantCard(
                     plant: plant,
+                    now: now,
                     onTap: () => Navigator.push(
                       context,
                       MaterialPageRoute(builder: (_) => PlantHistoryScreen(plant: plant)),
@@ -51,10 +54,21 @@ class PlantListScreen extends ConsumerWidget {
     );
   }
 
-  void _openSettings(BuildContext context, WidgetRef ref, PlantPot plant) {
-    showPlantSettingsSheet(context, plant, (name, dry, wet) async {
+  Future<void> _openSettings(BuildContext context, WidgetRef ref, PlantPot plant) async {
+    // Brak listy typów nie blokuje edycji nazwy i kalibracji; lista zostanie pobrana ponownie.
+    List<PlantType> plantTypes = const [];
+    try {
+      plantTypes = await ref.read(plantTypesProvider.future);
+    } catch (_) {
+      ref.invalidate(plantTypesProvider);
+    }
+    if (!context.mounted) return;
+
+    showPlantSettingsSheet(context, plant, plantTypes, (name, dry, wet, plantType) async {
       try {
-        await ref.read(plantsProvider.notifier).updateSettings(plant.id, name, dry, wet);
+        await ref
+            .read(plantsProvider.notifier)
+            .updateSettings(plant.id, name, dry, wet, plantType: plantType);
       } catch (e) {
         if (!context.mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(

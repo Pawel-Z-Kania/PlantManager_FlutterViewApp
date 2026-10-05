@@ -1,34 +1,30 @@
 import 'package:flutter/material.dart';
 import '../../domain/moisture_state.dart';
 import '../../domain/plant_pot.dart';
+import '../../domain/watering_forecast.dart';
 import 'alert_badge.dart';
+import 'watering_forecast_chip.dart';
 
 class PlantCard extends StatelessWidget {
   const PlantCard({
     super.key,
     required this.plant,
+    required this.now,
     required this.onTap,
     required this.onSettingsTap,
   });
 
   final PlantPot plant;
+  final DateTime now;
   final VoidCallback onTap;
   final VoidCallback onSettingsTap;
 
   @override
   Widget build(BuildContext context) {
     final state = plant.moistureState;
-    final diff = DateTime.now().difference(plant.lastUpdate);
-    final String timeAgo;
-    if (diff.inMinutes < 1) {
-      timeAgo = "Przed chwilą";
-    } else if (diff.inHours < 1) {
-      timeAgo = "${diff.inMinutes} min temu";
-    } else if (diff.inDays < 1) {
-      timeAgo = "${diff.inHours} godz. temu";
-    } else {
-      timeAgo = "${diff.inDays} dni temu";
-    }
+    final timeAgo = _capitalize(formatAgoPl(now.difference(plant.lastUpdate)));
+    final forecast = plant.wateringForecast(now);
+    final lastWatered = plant.lastWateredAt;
 
     final bool hasError = plant.hasError;
     final bool hasWarning = plant.hasWarning;
@@ -187,6 +183,20 @@ class PlantCard extends StatelessWidget {
                   ),
                 ],
               ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  WateringForecastChip(forecast: forecast),
+                  if (lastWatered != null)
+                    Text(
+                      'Podlano ${formatAgoPl(now.difference(lastWatered))}',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                    ),
+                ],
+              ),
               if (plant.activeAlerts.isNotEmpty) ...[
                 const SizedBox(height: 12),
                 Wrap(
@@ -205,3 +215,5 @@ class PlantCard extends StatelessWidget {
     );
   }
 }
+
+String _capitalize(String text) => text[0].toUpperCase() + text.substring(1);

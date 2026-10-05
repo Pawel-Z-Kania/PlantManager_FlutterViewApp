@@ -1,15 +1,25 @@
 import 'package:flutter/material.dart';
 import '../../domain/plant_pot.dart';
+import '../../domain/plant_type.dart';
 
-/// Modal do edycji nazwy i kalibracji czujnika; [onSave] wykonuje faktyczny zapis.
+/// Modal do edycji nazwy, typu rośliny i kalibracji czujnika; [onSave] wykonuje faktyczny zapis.
+/// Do [onSave] trafia typ rośliny tylko wtedy, gdy został zmieniony.
 void showPlantSettingsSheet(
   BuildContext context,
   PlantPot plant,
-  Future<void> Function(String name, int dry, int wet) onSave,
+  List<PlantType> plantTypes,
+  Future<void> Function(String name, int dry, int wet, String? plantType) onSave,
 ) {
   final nameController = TextEditingController(text: plant.name);
   double currentWet = plant.wetCalibration.toDouble();
   double currentDry = plant.dryCalibration.toDouble();
+  String selectedType = plant.plantType;
+
+  // DropdownButton wymaga, by aktualna wartość występowała na liście opcji.
+  final typeOptions = [...plantTypes];
+  if (typeOptions.isNotEmpty && !typeOptions.any((t) => t.code == plant.plantType)) {
+    typeOptions.add(PlantType(code: plant.plantType, labelPl: plant.plantType));
+  }
 
   // Zabezpieczenie przed błędem RangeSlider (min >= max)
   if (currentWet >= currentDry) {
@@ -49,6 +59,26 @@ void showPlantSettingsSheet(
                     border: OutlineInputBorder(),
                   ),
                 ),
+                if (typeOptions.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedType,
+                    decoration: InputDecoration(
+                      labelText: 'Typ rośliny',
+                      border: const OutlineInputBorder(),
+                      helperText: selectedType == unknownPlantType
+                          ? 'Typ wpływa na prognozę podlania'
+                          : null,
+                    ),
+                    items: [
+                      for (final type in typeOptions)
+                        DropdownMenuItem(value: type.code, child: Text(type.labelPl)),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) setModalState(() => selectedType = value);
+                    },
+                  ),
+                ],
                 const SizedBox(height: 24),
                 const Text(
                   'Kalibracja czujnika (Mokro - Sucho)',
@@ -91,7 +121,12 @@ void showPlantSettingsSheet(
                     ),
                     onPressed: () async {
                       Navigator.pop(context);
-                      await onSave(nameController.text, currentDry.round(), currentWet.round());
+                      await onSave(
+                        nameController.text,
+                        currentDry.round(),
+                        currentWet.round(),
+                        selectedType != plant.plantType ? selectedType : null,
+                      );
                     },
                     child: const Text('Zapisz zmiany', style: TextStyle(fontSize: 16)),
                   ),

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'moisture_state.dart';
+import 'plant_type.dart';
+import 'watering_forecast.dart';
 
 enum AlertSeverity { error, warning }
 
@@ -74,6 +76,9 @@ class PlantPot {
   final int? batteryMv;
   final int? intervalMinutes;
   final List<PlantAlert> alerts;
+  final String plantType;
+  final DateTime? lastWateredAt;
+  final DateTime? nextWateredDate;
 
   PlantPot({
     required this.id,
@@ -86,7 +91,13 @@ class PlantPot {
     this.batteryMv,
     this.intervalMinutes,
     this.alerts = const [],
+    this.plantType = unknownPlantType,
+    this.lastWateredAt,
+    this.nextWateredDate,
   });
+
+  WateringForecast wateringForecast(DateTime now) =>
+      WateringForecast.fromDate(nextWateredDate, now);
 
   MoistureState get moistureState {
     if (dryCalibration == wetCalibration) return MoistureState.humid;
